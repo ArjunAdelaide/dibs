@@ -152,7 +152,7 @@ EMAIL_VENUE = {"id": "lanes", "name": "Lanes", "categories": ["bowling"], "payme
 def live(ctx, monkeypatch):
     slots = quick18.parse(FIXTURE.read_text(), "https://x.quick18.com")
     monkeypatch.setattr("dibs.tools.slots_for", lambda venue, day: slots)
-    monkeypatch.setattr("dibs.executors.slots_for", lambda venue, day: slots)
+    monkeypatch.setattr("dibs.executors.slots_for", lambda venue, day, fresh=False: slots)
     ctx.catalog.venues.update({"mini": LIVE_VENUE, "lanes": EMAIL_VENUE})
     return ctx
 
@@ -546,3 +546,9 @@ def test_event_search_kinds_and_sessions(ctx, calendar, monkeypatch):
     assert asked == {"keyword": None, "kind": "music"}
     assert len(out["events"]) == 1 and out["events"][0]["more_dates"] == 1  # two nights, one line
     assert "error" in find_events(ctx, kind="concerts")
+
+
+def test_named_activity_needs_no_location(live):
+    out = suggest_ideas(live, "2026-10-07", "09:10", 2, category="mini_golf")  # no location saved
+    assert out["ideas"][0]["name"] == "Mini Golf" and out["ideas"][0]["open_slot"] == "09:10"
+    assert "distance_km" not in out["ideas"][0] and "09:20" in out["ideas"][0]["other_open_times"]

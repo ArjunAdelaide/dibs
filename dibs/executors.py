@@ -24,9 +24,9 @@ def pick_route(venue: dict) -> str:
     return "concierge"
 
 
-def find_slot(venue: dict, when: datetime, rate_name: str | None, party_size: int = 1):
+def find_slot(venue: dict, when: datetime, rate_name: str | None, party_size: int = 1, fresh: bool = False):
     """Return (slot, rate) for the exact time, or (None, None) if it is gone."""
-    for slot in slots_for(venue, when.date()):
+    for slot in slots_for(venue, when.date(), fresh=fresh):
         if slot.time == when.strftime("%H:%M") and slot.fits(party_size):
             wanted = [r for r in slot.rates if not rate_name or r.name == rate_name]
             if wanted:
@@ -111,7 +111,7 @@ def execute(ctx, proposal, venue: dict) -> dict:
         return cur.lastrowid
 
     if route == "link":
-        slot, rate = find_slot(venue, when, proposal["rate"], proposal["party_size"])
+        slot, rate = find_slot(venue, when, proposal["rate"], proposal["party_size"], fresh=True)  # never book on old data
         if not slot:
             return {"error": "that slot was just taken; call check_availability again and offer the nearest times"}
         if payments.enabled():

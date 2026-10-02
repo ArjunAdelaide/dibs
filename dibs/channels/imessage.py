@@ -11,6 +11,7 @@ history before the first run is never answered, and DRY_RUN=1 prints instead of 
 import re
 import sqlite3
 import subprocess
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -171,7 +172,7 @@ def background(conn: sqlite3.Connection, catalog: Catalog, llm) -> None:
         print(f"(background job failed: {type(exc).__name__}: {exc})")
 
 
-def run(poll_seconds: float = 2.0) -> None:
+def run(poll_seconds: float = 1.0) -> None:
     if not config.ALLOWLIST:
         raise SystemExit("ALLOWLIST is empty. Add the handles that may talk to the bot in .env, or ALLOWLIST=* for anyone.")
     try:
@@ -212,9 +213,16 @@ def run(poll_seconds: float = 2.0) -> None:
                 continue
             print("   (thinking...)")
             guid = row["chat_guid"]
+            holding = None
+            if config.HOLDING_AFTER_SECONDS > 0:  # a slow turn gets a quick "one sec" so the user is not left waiting
+                holding = threading.Timer(config.HOLDING_AFTER_SECONDS, send_to_chat, args=(guid, "One sec, checking that for you."))
+                holding.start()
+            started = time.monotonic()
             reply = run_turn(conn, catalog, llm, guid, row["handle"], text, notify_operator, is_group=is_group,
                              send_later=lambda later, guid=guid: (print(f"-> (later) {later}"), send_to_chat(guid, later)))
-            print(f"-> {reply}")
+            if holding:
+                holding.cancel()
+            print(f"-> ({time.monotonic() - started:.0f}s) {reply}")
             send_to_chat(row["chat_guid"], reply)
         background(conn, catalog, llm)
         time.sleep(poll_seconds)

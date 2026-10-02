@@ -136,11 +136,12 @@ def check_site(ctx: ToolContext, venue_id: str, day: str, around_time: str = "16
     return {"started": True, "next": "Say you are checking their site now and will text back in a couple of minutes. Do not guess times."}
 
 
-def suggest_ideas(ctx: ToolContext, day: str, around_time: str = "16:00", party_size: int = 2, max_km: float | None = None) -> dict:
-    """Ideas of different kinds near the user, with a real open slot where a live feed exists."""
+def suggest_ideas(ctx: ToolContext, day: str, around_time: str = "16:00", party_size: int = 2, max_km: float | None = None,
+                  category: str | None = None) -> dict:
+    """Venues with a real open slot near a time: one call does the search and the availability check."""
     prefs = db.get_prefs(ctx.conn, ctx.handle)
     origin = prefs.get("location")
-    if not origin:
+    if not origin and not category:
         return {"error": "no location yet: ask where they are and how far they will travel, then call set_location"}
     try:
         max_km = float(max_km or prefs.get("max_travel_km") or DEFAULT_TRAVEL_KM)
@@ -151,17 +152,23 @@ def suggest_ideas(ctx: ToolContext, day: str, around_time: str = "16:00", party_
 
     nearby = []
     for venue in ctx.catalog.venues.values():
+        if category and category.lower() not in [c.lower() for c in venue.get("categories", [])]:
+            continue
+        if not origin:  # an activity was named but we do not know where they are: search the whole city
+            nearby.append((0.0, venue))
+            continue
         if venue.get("lat") is None:
             continue
         km = geo.haversine_km(origin["lat"], origin["lon"], venue["lat"], venue["lon"])
-        if km <= max_km:
+        if km <= max_km or (category and has_connector(venue)):  # a bookable venue of the asked kind is worth the trip
             nearby.append((km, venue))
     nearby.sort(key=lambda pair: (not has_connector(pair[1]), pair[0]))  # live venues first, then nearest
 
     ideas, lookups = [], 0
     for km, venue in nearby:
-        idea = {"venue_id": venue["id"], "name": venue["name"], "kind": (venue.get("categories") or ["other"])[0],
-                "distance_km": round(km, 1), "live": False}
+        idea = {"venue_id": venue["id"], "name": venue["name"], "kind": (venue.get("categories") or ["other"])[0], "live": False}
+        if origin:
+            idea["distance_km"] = round(km, 1)
         if has_connector(venue) and lookups < MAX_LIVE_LOOKUPS:
             lookups += 1
             try:
@@ -173,7 +180,8 @@ def suggest_ideas(ctx: ToolContext, day: str, around_time: str = "16:00", party_
                 continue  # live feed shows nothing near that time: do not suggest it
             best = min(near, key=lambda s: abs(int(s.time[:2]) * 60 + int(s.time[3:]) - target))
             cheapest = min(best.rates, key=lambda r: r.price)
-            idea.update(live=True, open_slot=best.time, price_per_person=cheapest.price, rate=cheapest.name)
+            idea.update(live=True, open_slot=best.time, price_per_person=cheapest.price, rate=cheapest.name,
+                        other_open_times=[s.time for s in sorted(near, key=lambda s: s.time) if s.time != best.time][:4])
         ideas.append(idea)
 
     # One idea per kind first, so the user sees different things to do.
@@ -182,7 +190,7 @@ def suggest_ideas(ctx: ToolContext, day: str, around_time: str = "16:00", party_
         (rest if idea["kind"] in seen else varied).append(idea)
         seen.add(idea["kind"])
     picked = (varied + rest)[:6]
-    return {"ideas": picked, "within_km": max_km, "from": origin["name"],
+    return {"ideas": picked, "within_km": max_km, "from": origin["name"] if origin else "anywhere in the city (location unknown)",
             "note": "live=true ideas have a real open slot. For live=false you cannot see times: say the venue confirms."
                     if picked else "Nothing within that distance. Offer to look further."}
 
@@ -471,14 +479,16 @@ SCHEMAS = [
     _fn("check_availability", "Live open slots and prices near a time, for venues with live_availability=true.",
         {"venue_id": {"type": "string"}, "day": {"type": "string", "description": "Local date, YYYY-MM-DD"},
          "around_time": {"type": "string", "description": "HH:MM, 24h"}, "party_size": {"type": "integer"}}, ["venue_id", "day"]),
-    _fn("check_site", "For venues WITHOUT live_availability that have a booking site: open the site in a browser and read the open times. "
-        "Slow (1 to 2 minutes); the answer is texted to the user afterwards.",
+    _fn("check_site", "ONLY when the user asks about one venue by name and it has no live_availability: open its booking site in a "
+        "browser and read the open times. Slow (1 to 2 minutes); the answer is texted to the user afterwards. Never use it to browse options.",
         {"venue_id": {"type": "string"}, "day": {"type": "string", "description": "YYYY-MM-DD"},
          "around_time": {"type": "string", "description": "HH:MM, 24h"}, "party_size": {"type": "integer"}}, ["venue_id", "day"]),
-    _fn("suggest_ideas", "Ideas for things to do near the user at a time, of different kinds, with real open slots where known. "
-        "Use this when the user has not named an activity.",
+    _fn("suggest_ideas", "The fastest way to find something bookable: venues near the user with a real open slot near a time, in one call. "
+        "Use it for open requests (no category) and for a named activity (set category). You can go straight to propose_booking "
+        "with the venue_id, open_slot and rate it returns.",
         {"day": {"type": "string", "description": "Local date, YYYY-MM-DD"}, "around_time": {"type": "string", "description": "HH:MM, 24h"},
-         "party_size": {"type": "integer"}, "max_km": {"type": "number", "description": "How far they will travel"}}, ["day"]),
+         "party_size": {"type": "integer"}, "max_km": {"type": "number", "description": "How far they will travel"},
+         "category": CATEGORY}, ["day"]),
     _fn("set_location", "Save where the user is: a suburb, an address, or 'lat,lon'.",
         {"place": {"type": "string"}}, ["place"]),
     _fn("remember", "Save one of the fixed facts the booking forms need.",

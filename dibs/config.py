@@ -24,7 +24,7 @@ _load_dotenv()
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "gemini-flash-lite-latest")
-LLM_FALLBACK_MODELS = [m.strip() for m in os.getenv("LLM_FALLBACK_MODELS", "gemini-3.5-flash,gemini-3.1-flash-lite,gemini-flash-latest").split(",") if m.strip()]
+LLM_FALLBACK_MODELS = [m.strip() for m in os.getenv("LLM_FALLBACK_MODELS", "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.5-flash").split(",") if m.strip()]
 
 DB_PATH = Path(os.getenv("DIBS_DB", str(ROOT / "data" / "dibs.db")))
 VENUES_PATH = ROOT / "data" / "venues.json"
@@ -70,6 +70,8 @@ COUNTRY_CODE = os.getenv("DIBS_COUNTRY", "AU")
 EVENT_CHECK_HOURS = int(os.getenv("EVENT_CHECK_HOURS", "6"))
 
 ALERT_INTERVAL_MINUTES = int(os.getenv("ALERT_INTERVAL_MINUTES", "30"))
+# Text "one sec" when a reply takes longer than this many seconds. 0 turns it off.
+HOLDING_AFTER_SECONDS = float(os.getenv("HOLDING_AFTER_SECONDS", "8"))
 PROPOSAL_TTL_MINUTES = 30
 HISTORY_TURNS = 20
 MAX_TOOL_ROUNDS = 6
