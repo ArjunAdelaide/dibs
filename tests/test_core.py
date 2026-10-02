@@ -27,6 +27,8 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr("dibs.config.SMTP_USER", "")
     monkeypatch.setattr("dibs.config.SMTP_PASSWORD", "")
     monkeypatch.setattr("dibs.config.TICKETMASTER_API_KEY", "")
+    monkeypatch.setattr("dibs.config.PAYMENTS_ENABLED", False)
+    monkeypatch.setattr("dibs.config.STRIPE_SECRET_KEY", "")
 
 
 @pytest.fixture
@@ -439,3 +441,90 @@ def test_check_site_reports_now_or_later(ctx, monkeypatch):
     ctx.send_later = None
     assert "bot check" in check_site(ctx, "page", "2026-10-07")["report"]
     assert "error" in check_site(ctx, "test-bowl", "2026-10-07")  # no booking site on file
+
+
+# --- open access, limits, opt-out ---
+
+from dibs.channels import imessage  # noqa: E402
+
+
+def test_open_access_and_blocklist(monkeypatch):
+    monkeypatch.setattr("dibs.config.ALLOWLIST", {"*"})
+    monkeypatch.setattr("dibs.config.OPEN_ACCESS", True)
+    monkeypatch.setattr("dibs.config.BLOCKLIST", {"+61488888888"})
+    assert imessage.allowed("+61412345678") and imessage.allowed("someone@example.com")
+    assert not imessage.allowed("+61488888888")  # blocked
+    assert not imessage.allowed("12345")  # short codes and other senders are ignored
+
+
+def test_stop_start_and_rate_limit(ctx, monkeypatch):
+    h = ctx.handle
+    assert imessage.gate(ctx.conn, h, "hello") is None
+    alerts.create(ctx.conn, "c1", h, "test-bowl", "2026-10-07", None, "09:00", "10:00", 2, None)
+    assert "won't hear from Dibs" in imessage.gate(ctx.conn, h, "STOP")
+    assert ctx.conn.execute("SELECT status FROM alerts").fetchone()["status"] == "cancelled"
+    assert imessage.gate(ctx.conn, h, "bowling?") == ""  # silent while stopped
+    assert "Welcome back" in imessage.gate(ctx.conn, h, "start")
+    monkeypatch.setattr("dibs.config.MAX_MSGS_PER_HOUR", 2)
+    db.add_message(ctx.conn, "c1", h, "user", "one")
+    db.add_message(ctx.conn, "c1", h, "user", "two")
+    assert "limit" in imessage.gate(ctx.conn, h, "three")  # told once
+    assert imessage.gate(ctx.conn, h, "four") == ""  # then silence
+
+
+# --- payments (Stripe calls are faked: no network, no money) ---
+
+from dibs import payments  # noqa: E402
+
+
+@pytest.fixture
+def paying(live, monkeypatch):
+    monkeypatch.setattr("dibs.config.PAYMENTS_ENABLED", True)
+    monkeypatch.setattr("dibs.config.STRIPE_SECRET_KEY", "sk_test_x")
+    state = {"card": None, "charges": [], "refunds": []}
+    monkeypatch.setattr("dibs.payments.saved_card", lambda conn, handle: state["card"])
+    monkeypatch.setattr("dibs.payments.setup_link", lambda conn, handle: "https://checkout.stripe.test/setup")
+
+    def fake_charge(conn, handle, amount_cents, description, proposal_id):
+        if state.get("decline"):
+            raise payments.PaymentError("the card was declined (card_declined)")
+        state["charges"].append(amount_cents)
+        return "pi_test_1"
+
+    monkeypatch.setattr("dibs.payments.charge", fake_charge)
+    monkeypatch.setattr("dibs.payments.refund", lambda intent: state["refunds"].append(intent))
+    live.state = state
+    return live
+
+
+def test_payment_flow_card_then_charge(paying):
+    out = propose_booking(paying, "mini", "2026-10-07T09:10", 4, rate="SHANX Single")
+    assert "total $72.00 charged to your saved card" in out["summary"]  # 4 x $18, shown before the yes
+    paying.last_user_text = "yes"
+    first = confirm_booking(paying, out["proposal_id"])
+    assert first["needs_card"] and "stripe" in first["setup_link"] and paying.state["charges"] == []
+    assert paying.conn.execute("SELECT status FROM proposals").fetchone()["status"] == "pending"  # still open for the next yes
+    paying.state["card"] = "pm_test"
+    second = confirm_booking(paying, out["proposal_id"])
+    assert second["route"] == "paid" and second["charged"] == "$72.00" and paying.state["charges"] == [7200]
+    row = paying.conn.execute("SELECT status, amount_cents, payment_intent FROM bookings").fetchone()
+    assert tuple(row) == ("paid_needs_human", 7200, "pi_test_1")
+    assert "PAID booking" in paying.alerts[0] and "$72.00" in paying.alerts[0]
+    assert "error" in confirm_booking(paying, out["proposal_id"])  # a second yes cannot charge again
+
+
+def test_declined_card_books_nothing(paying):
+    paying.state.update(card="pm_test", decline=True)
+    pid = propose_booking(paying, "mini", "2026-10-07T09:10", 2, rate="SHANX Single")["proposal_id"]
+    paying.last_user_text = "yes"
+    out = confirm_booking(paying, pid)
+    assert "payment failed" in out["error"] and paying.conn.execute("SELECT COUNT(*) FROM bookings").fetchone()[0] == 0
+
+
+def test_live_key_is_refused_and_amount_is_capped(monkeypatch, ctx):
+    monkeypatch.setattr("dibs.config.STRIPE_SECRET_KEY", "sk_live_x")
+    with pytest.raises(payments.PaymentError):
+        payments._stripe()
+    monkeypatch.setattr("dibs.config.STRIPE_SECRET_KEY", "sk_test_x")
+    with pytest.raises(payments.PaymentError):
+        payments.charge(ctx.conn, ctx.handle, 10_000_000, "too much", 1)

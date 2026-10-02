@@ -4,3 +4,4 @@ httpx
 openai
 pytest
 playwright
+stripe

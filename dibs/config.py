@@ -38,6 +38,10 @@ REGION = os.getenv("DIBS_REGION", "South Australia, Australia")  # geocoding loo
 
 # iMessage bridge safety: only these handles get replies, and nothing is sent while DRY_RUN=1.
 ALLOWLIST = {h.strip() for h in os.getenv("ALLOWLIST", "").split(",") if h.strip()}
+OPEN_ACCESS = "*" in ALLOWLIST  # ALLOWLIST=* lets anyone text the agent
+BLOCKLIST = {h.strip() for h in os.getenv("BLOCKLIST", "").split(",") if h.strip()}
+MAX_MSGS_PER_HOUR = int(os.getenv("MAX_MSGS_PER_HOUR", "30"))
+MAX_MSGS_PER_DAY = int(os.getenv("MAX_MSGS_PER_DAY", "120"))
 DRY_RUN = os.getenv("DRY_RUN", "1") == "1"
 GROUP_TRIGGER = os.getenv("GROUP_TRIGGER", "dibs").lower()
 
@@ -50,6 +54,14 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 BOOKING_REPLY_TO = os.getenv("BOOKING_REPLY_TO", "")
+
+# Payments (optional). Keep the Stripe *test* key here until you are a registered business.
+PAYMENTS_ENABLED = os.getenv("PAYMENTS_ENABLED", "0") == "1"
+PAYMENTS_LIVE = os.getenv("PAYMENTS_LIVE", "0") == "1"
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+CURRENCY = os.getenv("DIBS_CURRENCY", "aud")
+MAX_CHARGE_CENTS = int(os.getenv("MAX_CHARGE_CENTS", "30000"))
+PAYMENT_RETURN_URL = os.getenv("PAYMENT_RETURN_URL", "https://github.com/ArjunAdelaide/dibs#card-saved")
 
 # Free key from developer.ticketmaster.com. Without it, event search uses data/events.json only.
 TICKETMASTER_API_KEY = os.getenv("TICKETMASTER_API_KEY", "")

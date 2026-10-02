@@ -10,7 +10,7 @@ import smtplib
 from datetime import datetime
 from email.message import EmailMessage
 
-from . import config, db, memory
+from . import config, db, memory, payments
 from .connectors import has_connector, slots_for
 
 
@@ -64,15 +64,46 @@ def send_booking_email(venue: dict, when: datetime, party_size: int, name: str, 
     return "sent"
 
 
+def total_cents(rate, party_size: int) -> int:
+    return round(rate.price * 100) * party_size
+
+
+def pay_and_hand_over(ctx, proposal, venue: dict, rate, record) -> dict:
+    """Charge the user's saved card for the exact total, then hand the paid booking to the operator.
+
+    Until Dibs can pay venues by itself, a person completes the booking on the venue site.
+    """
+    total = total_cents(rate, proposal["party_size"])
+    try:
+        if not payments.saved_card(ctx.conn, ctx.handle):
+            return {"needs_card": True, "setup_link": payments.setup_link(ctx.conn, ctx.handle),
+                    "status": "NOT booked and NOT charged",
+                    "tell_user": "Send this link on its own line. Say: save a card once on Stripe's secure page (card or Apple Pay), "
+                                 "then reply YES again and you will book it."}
+        intent = payments.charge(ctx.conn, ctx.handle, total, f"{venue['name']} {proposal['starts_at']} x{proposal['party_size']}", proposal["id"])
+    except payments.PaymentError as exc:
+        return {"error": f"payment failed: {exc}. Nothing was booked. Tell the user plainly and offer the venue link instead: {rate.url}"}
+    booking_id = record("paid_needs_human", total, intent)
+    ctx.notify_operator(
+        f"[dibs] PAID booking #{booking_id}: ${total / 100:.2f} from {ctx.handle} for {venue['name']} {proposal['starts_at']} "
+        f"x{proposal['party_size']} ({rate.name}). Book it here: {rate.url} Then run: python -m dibs.ops booked {booking_id} <reference> "
+        f"(or: python -m dibs.ops failed {booking_id} <reason>, which refunds)."
+    )
+    return {"booking_id": booking_id, "route": "paid", "charged": f"${total / 100:.2f}",
+            "status": "paid; the booking is being completed and is NOT confirmed yet",
+            "tell_user": "Say the amount charged to their saved card, that the booking is being completed now, and that you "
+                         "will text the confirmation. If it cannot be completed they get a full refund."}
+
+
 def execute(ctx, proposal, venue: dict) -> dict:
     """Run the venue's route for a proposal the user has just approved."""
     when = datetime.fromisoformat(proposal["starts_at"])
     route = pick_route(venue)
 
-    def record(status: str) -> int:
+    def record(status: str, amount_cents: int | None = None, payment_intent: str | None = None) -> int:
         cur = ctx.conn.execute(
-            "INSERT INTO bookings (proposal_id, status, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (proposal["id"], status, db.now_iso(), db.now_iso()),
+            "INSERT INTO bookings (proposal_id, status, amount_cents, payment_intent, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (proposal["id"], status, amount_cents, payment_intent, db.now_iso(), db.now_iso()),
         )
         ctx.conn.execute("UPDATE proposals SET status = 'confirmed' WHERE id = ?", (proposal["id"],))
         ctx.conn.commit()
@@ -83,6 +114,8 @@ def execute(ctx, proposal, venue: dict) -> dict:
         slot, rate = find_slot(venue, when, proposal["rate"], proposal["party_size"])
         if not slot:
             return {"error": "that slot was just taken; call check_availability again and offer the nearest times"}
+        if payments.enabled():
+            return pay_and_hand_over(ctx, proposal, venue, rate, record)
         return {
             "booking_id": record("link_sent"), "route": "link", "booking_link": rate.url,
             "price": f"${rate.price:.2f} per person ({rate.name})",

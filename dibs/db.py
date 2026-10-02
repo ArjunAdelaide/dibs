@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS bookings (
     proposal_id INTEGER NOT NULL REFERENCES proposals(id),
     status TEXT NOT NULL DEFAULT 'needs_human',
     reference TEXT NOT NULL DEFAULT '',
+    amount_cents INTEGER,
+    payment_intent TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -93,6 +95,9 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     if "rate" not in [c[1] for c in conn.execute("PRAGMA table_info(proposals)")]:  # databases from before live rates
         conn.execute("ALTER TABLE proposals ADD COLUMN rate TEXT")
+    if "payment_intent" not in [c[1] for c in conn.execute("PRAGMA table_info(bookings)")]:  # databases from before payments
+        conn.execute("ALTER TABLE bookings ADD COLUMN amount_cents INTEGER")
+        conn.execute("ALTER TABLE bookings ADD COLUMN payment_intent TEXT")
     return conn
 
 
@@ -127,6 +132,11 @@ def history(conn: sqlite3.Connection, conv_id: str, limit: int) -> list[sqlite3.
         (conv_id, limit),
     ).fetchall()
     return list(reversed(rows))
+
+
+def user_messages_since(conn: sqlite3.Connection, handle: str, since_iso: str) -> int:
+    return conn.execute("SELECT COUNT(*) FROM messages WHERE handle = ? AND role = 'user' AND created_at > ?",
+                        (handle, since_iso)).fetchone()[0]
 
 
 def kv_get(conn: sqlite3.Connection, key: str) -> str | None:

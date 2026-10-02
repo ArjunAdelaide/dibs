@@ -7,7 +7,7 @@
 
 import argparse
 
-from . import db
+from . import db, payments
 from .catalog import Catalog
 from .channels.imessage import send_to_chat
 
@@ -26,7 +26,7 @@ def main() -> None:
     catalog = Catalog.load()
     if args.cmd == "list":
         rows = conn.execute(
-            "SELECT b.id, b.status, p.* FROM bookings b JOIN proposals p ON p.id = b.proposal_id WHERE b.status IN ('needs_human', 'requested') ORDER BY b.id"
+            "SELECT b.id, b.status, p.* FROM bookings b JOIN proposals p ON p.id = b.proposal_id WHERE b.status IN ('needs_human', 'requested', 'paid_needs_human') ORDER BY b.id"
         ).fetchall()
         for r in rows:
             venue = catalog.venues.get(r["venue_id"], {})
@@ -36,7 +36,7 @@ def main() -> None:
         return
 
     row = conn.execute(
-        "SELECT p.conv_id, p.venue_id, p.starts_at FROM bookings b JOIN proposals p ON p.id = b.proposal_id WHERE b.id = ?",
+        "SELECT p.conv_id, p.venue_id, p.starts_at, b.payment_intent, b.amount_cents FROM bookings b JOIN proposals p ON p.id = b.proposal_id WHERE b.id = ?",
         (args.booking_id,),
     ).fetchone()
     if not row:
@@ -45,8 +45,12 @@ def main() -> None:
                  (args.cmd, args.detail, db.now_iso(), args.booking_id))
     conn.commit()
     name = catalog.venues.get(row["venue_id"], {}).get("name", row["venue_id"])
+    refunded = ""
+    if args.cmd == "failed" and row["payment_intent"]:  # never keep money for a booking that did not happen
+        payments.refund(row["payment_intent"])
+        refunded = f" I've refunded your ${row['amount_cents'] / 100:.2f} in full."
     text = (f"You're booked at {name}. {args.detail}" if args.cmd == "booked"
-            else f"Couldn't lock in {name}: {args.detail}. Want me to try that instead?")
+            else f"Couldn't lock in {name}: {args.detail}.{refunded} Want me to try something else?")
     db.add_message(conn, row["conv_id"], "dibs", "assistant", text)
     if not row["conv_id"].startswith("cli;"):
         send_to_chat(row["conv_id"], text)

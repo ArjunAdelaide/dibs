@@ -9,6 +9,8 @@ Text it "I want to do something tomorrow at 4pm". It asks where you are and how 
 - **Memory** in plain text files you can read
 - **Runs on one Mac for $0**: the Messages app is the gateway, a free model tier is the brain, OpenStreetMap is the map
 
+**Try it:** send an iMessage to `iamdibsagent@gmail.com`. It answers when the host Mac is on.
+
 Built for one city (Adelaide) and one category (experiences), in the spirit of the vertical agents from DoorDash and others. Change the city and the venue list to run it somewhere else.
 
 ## Setup
@@ -41,6 +43,8 @@ Pick a model your key can use: `.venv/bin/python -m dibs.llm` lists them. Put th
 ```
 
 In group chats it only answers messages that contain `dibs`.
+
+**Who can text it.** `ALLOWLIST` holds the numbers that get replies. Set `ALLOWLIST=*` to let anyone text the agent. Then these limits apply: 30 messages per hour and 120 per day for each person (`MAX_MSGS_PER_HOUR`, `MAX_MSGS_PER_DAY`), a `BLOCKLIST`, and STOP / START: a person who texts STOP gets no more messages and their alerts are cancelled. The agent only ever replies; it never texts a person first, except for an alert that person asked for.
 
 **3. HTTP API** (for a paid gateway later): `.venv/bin/uvicorn dibs.api:app --reload`, then POST `{"handle": "...", "text": "..."}` to `/inbound`.
 
@@ -117,6 +121,17 @@ Memory is plain text files, one folder per user, in `data/memory/` (not publishe
 .venv/bin/python -m dibs.memory consolidate   # run the tidy-up now
 ```
 
+## Payments (optional, Stripe)
+
+Off by default. With `PAYMENTS_ENABLED=1` and a Stripe **test** key in `STRIPE_SECRET_KEY`:
+
+1. The proposal shows the exact total ("total $72.00 charged to your saved card").
+2. On the first YES, a person with no saved card gets a link to a Stripe-hosted page and saves a card there (card or Apple Pay). Dibs never sees card numbers.
+3. On the next YES, Dibs charges the saved card for that total, one time per proposal.
+4. You get a "PAID booking" alert and complete the booking on the venue site. `ops booked` texts the confirmation. `ops failed` refunds the full amount and tells the user.
+
+Limits in code: a live key is refused unless `PAYMENTS_LIVE=1`, and no charge can exceed `MAX_CHARGE_CENTS` (default $300). Taking real money from other people makes you a merchant: get a registered business and advice on refunds and tax before you turn on live mode.
+
 ## Concierge loop (you are the booking engine)
 
 1. A user says YES to a proposal. You get an iMessage alert with the venue, time, party size and booking link.
@@ -155,7 +170,8 @@ dibs/events.py       concerts, festivals, sport: search and ticket alerts
 dibs/memory.py       text-file memory and the daily tidy-up
 dibs/geo.py          distance and place lookup
 dibs/browser.py      browser agent: reads open times from a venue's booking site
-dibs/executors.py    booking routes: link, email, page, concierge
+dibs/executors.py    booking routes: link, email, page, concierge, paid
+dibs/payments.py     Stripe: saved card, charge, refund
 dibs/llm.py          any OpenAI-compatible endpoint (Gemini free, Ollama, paid later)
 dibs/channels/       imessage.py (Mac bridge)
 dibs/cli.py          terminal simulator

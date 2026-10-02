@@ -12,7 +12,7 @@ import re
 import sqlite3
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -108,8 +108,42 @@ def notify_operator(text: str) -> None:
     send_to_handle(config.OPERATOR_HANDLE, text)
 
 
+SENDER = re.compile(r"^(\+\d{8,15}|[^@\s]+@[^@\s]+\.[a-z]{2,})$", re.I)  # a real phone number or email, not a short code
+
+
+def allowed(handle: str) -> bool:
+    if handle in config.BLOCKLIST:
+        return False
+    if config.OPEN_ACCESS:
+        return bool(SENDER.match(handle))
+    return handle in config.ALLOWLIST
+
+
+def gate(conn: sqlite3.Connection, handle: str, text: str) -> str | None:
+    """Opt-out and rate limits. Returns a reply to send instead of running the agent, '' for silence, or None to go on."""
+    word = text.strip().lower()
+    if word in ("stop", "unsubscribe"):
+        db.kv_set(conn, f"stopped:{handle}", "1")
+        conn.execute("UPDATE alerts SET status = 'cancelled' WHERE handle = ? AND status = 'active'", (handle,))
+        conn.execute("UPDATE event_alerts SET status = 'cancelled' WHERE handle = ? AND status = 'active'", (handle,))
+        conn.commit()
+        return "Done. You won't hear from Dibs again, and your alerts are off. Text START to come back."
+    if db.kv_get(conn, f"stopped:{handle}") == "1":
+        if word != "start":
+            return ""
+        db.kv_set(conn, f"stopped:{handle}", "0")
+        return "Welcome back. What do you feel like doing?"
+    now = datetime.now(ZoneInfo("UTC"))
+    hour = db.user_messages_since(conn, handle, (now - timedelta(hours=1)).isoformat(timespec="seconds"))
+    day = db.user_messages_since(conn, handle, (now - timedelta(days=1)).isoformat(timespec="seconds"))
+    if hour >= config.MAX_MSGS_PER_HOUR or day >= config.MAX_MSGS_PER_DAY:
+        db.add_message(conn, f"limit;{handle}", handle, "user", "(over limit)")  # counted, so the notice goes out once
+        return "You've hit the message limit for now. Try again in a little while." if hour == config.MAX_MSGS_PER_HOUR or day == config.MAX_MSGS_PER_DAY else ""
+    return None
+
+
 def should_answer(handle: str, text: str, is_group: bool) -> bool:
-    if handle not in config.ALLOWLIST:
+    if not allowed(handle):
         return False
     if is_group and config.GROUP_TRIGGER not in text.lower():
         return False
@@ -139,7 +173,7 @@ def background(conn: sqlite3.Connection, catalog: Catalog, llm) -> None:
 
 def run(poll_seconds: float = 2.0) -> None:
     if not config.ALLOWLIST:
-        raise SystemExit("ALLOWLIST is empty. Add the test handles that may talk to the bot in .env.")
+        raise SystemExit("ALLOWLIST is empty. Add the handles that may talk to the bot in .env, or ALLOWLIST=* for anyone.")
     try:
         src = sqlite3.connect(f"file:{CHAT_DB}?mode=ro", uri=True)
         src.execute("SELECT MAX(ROWID) FROM message").fetchone()
@@ -154,7 +188,8 @@ def run(poll_seconds: float = 2.0) -> None:
     if last is None:  # first run: start from now, never reply to old history
         last = str(src.execute("SELECT COALESCE(MAX(ROWID), 0) FROM message").fetchone()[0])
         db.kv_set(conn, "imessage_last_rowid", last)
-    print(f"Watching Messages (dry_run={config.DRY_RUN}, allowlist={sorted(config.ALLOWLIST)})")
+    who = "ANYONE (open access)" if config.OPEN_ACCESS else sorted(config.ALLOWLIST)
+    print(f"Watching Messages (dry_run={config.DRY_RUN}, allowlist={who})")
     print("Waiting for a new iMessage. Press Control + C to stop.")
 
     while True:
@@ -165,10 +200,16 @@ def run(poll_seconds: float = 2.0) -> None:
             is_group = row["style"] == GROUP_STYLE
             if not text or not should_answer(row["handle"], text, is_group):
                 # Say why, without the message text, so a silent bridge is easy to diagnose.
-                why = "not in ALLOWLIST" if row["handle"] not in config.ALLOWLIST else "group message without the trigger word" if text else "no text"
+                why = "not in ALLOWLIST" if not allowed(row["handle"]) else "group message without the trigger word" if text else "no text"
                 print(f"(ignored a message from {row['handle']}: {why})")
                 continue
             print(f"<- {row['handle']}: {text}")
+            canned = gate(conn, row["handle"], text)
+            if canned is not None:
+                if canned:
+                    print(f"-> {canned}")
+                    send_to_chat(row["chat_guid"], canned)
+                continue
             print("   (thinking...)")
             guid = row["chat_guid"]
             reply = run_turn(conn, catalog, llm, guid, row["handle"], text, notify_operator, is_group=is_group,
@@ -196,10 +237,10 @@ def check() -> None:
         report(False, "This terminal cannot read the Messages database. Give Full Disk Access to the app that "
                       "runs this terminal (System Settings > Privacy & Security > Full Disk Access), then restart that app.")
     report(bool(config.LLM_API_KEY), "LLM_API_KEY is set." if config.LLM_API_KEY else "LLM_API_KEY is empty in .env.")
-    report(bool(config.ALLOWLIST), f"ALLOWLIST has {len(config.ALLOWLIST)} tester(s)." if config.ALLOWLIST
+    report(bool(config.ALLOWLIST), ("ALLOWLIST=*: anyone can text the agent." if config.OPEN_ACCESS else f"ALLOWLIST has {len(config.ALLOWLIST)} tester(s).") if config.ALLOWLIST
            else "ALLOWLIST is empty in .env. Add the tester's number, for example +61412345678.")
     for handle in config.ALLOWLIST:
-        if not (handle.startswith("+") or "@" in handle):
+        if handle != "*" and not (handle.startswith("+") or "@" in handle):
             report(False, f"'{handle}' must be a number that starts with + (for example +61412345678) or an email.")
     print(("NOTE " + "OPERATOR_HANDLE is empty: booking alerts only print in this terminal.") if not config.OPERATOR_HANDLE
           else "OK   OPERATOR_HANDLE is set.")

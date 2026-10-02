@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from . import alerts, config, db, events, executors, geo, memory
+from . import alerts, config, db, events, executors, geo, memory, payments
 from .catalog import Catalog, deal_applies
 from .connectors import has_connector, slots_for
 
@@ -381,6 +381,8 @@ def propose_booking(ctx: ToolContext, venue_id: str, starts_at: str, party_size:
         if not slot:
             return {"error": "that time, rate or group size is not open on the live feed; call check_availability and offer real slots"}
         deal_note = f"${found.price:.2f} per person ({found.name})"
+        if payments.enabled():  # the user must see the exact amount before they say yes
+            deal_note += f", total ${executors.total_cents(found, party_size) / 100:.2f} charged to your saved card"
     # One open proposal per conversation keeps "yes" unambiguous.
     ctx.conn.execute("UPDATE proposals SET status = 'superseded' WHERE conv_id = ? AND status = 'pending'", (ctx.conv_id,))
     cur = ctx.conn.execute(
