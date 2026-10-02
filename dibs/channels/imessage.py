@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .. import alerts, config, db, events, memory
+from .. import alerts, config, db, events, memory, ops
 from ..agent import run_turn
 from ..catalog import Catalog
 from ..llm import OpenAICompatLLM
@@ -164,6 +164,9 @@ def background(conn: sqlite3.Connection, catalog: Catalog, llm) -> None:
         sent = alerts.check_due(conn, catalog, send_to_chat) + events.check_due(conn, send_to_chat)
         if sent:
             print(f"(sent {sent} alert message(s))")
+        refunded = ops.refund_stale_paid(conn, catalog, send_to_chat)
+        if refunded:
+            print(f"(refunded {refunded} paid booking(s) that were not completed in time)")
         now = datetime.now(ZoneInfo(config.TIMEZONE))
         if now.hour >= 3 and db.kv_get(conn, "memory_consolidated_on") != now.date().isoformat():
             db.kv_set(conn, "memory_consolidated_on", now.date().isoformat())

@@ -9,7 +9,8 @@ from zoneinfo import ZoneInfo
 from . import config, db, geo, memory
 from .catalog import Catalog
 from .llm import LLM, LLMUnavailable
-from .tools import SCHEMAS, ToolContext, run_tool
+from . import executors
+from .tools import AFFIRMATIVE, SCHEMAS, ToolContext, confirm_booking, run_tool
 
 SYSTEM = """You are Dibs, a texting concierge for experiences in {city}: bowling, golf, driving ranges, mini golf, laser tag, VR, escape rooms, arcades, and ticketed events (concerts, festivals, sport).
 You find the best slot, the best off-peak deal, and get it booked. For ticketed events you find the event, give the ticket link, and set alerts. Nothing else: politely decline unrelated requests.
@@ -33,7 +34,7 @@ How you work:
 - When they name the activity, day, time and group size ("book mini golf tomorrow at 4 for 2"), find the best live option and go straight to propose_booking in the same turn. Do not ask where they are first.
 - Save how far they will travel with remember(max_travel_km) so you do not ask again.
 - Offer at most 3 numbered options. If a deal applies at a nearby time (find_deals near_misses), mention the cheaper slot.
-- To book: propose_booking, show the summary, ask them to reply YES. Only call confirm_booking after they say yes.
+- To book: call propose_booking. The system then sends the exact summary to the user and handles their YES. If the user changes anything (people, time, venue), call propose_booking again with the new details: never describe a changed booking in your own words.
 - Location: search_venues returns the nearest venues when a location is known. If none is known, ask which suburb they are in (or ask them to share a location pin) and call set_location. Offer 2 or 3 venues, nearest first, and say the distance.
 - If the slot they want is not open, or they want a lower price, offer an alert (create_alert). Never promise to watch a venue without creating one.
 - Ticketed events are city-wide: do not ask for a suburb or travel distance for them. Use find_events. If nothing is in the dates asked, offer the next ones it returns. For a general ask ("any concerts this month?") set kind and the dates and leave keyword empty; keyword is only for a name. List up to 5, one line each: name, date, venue. You never buy tickets and never join queues: you send the official link and set alerts. If tickets are not on sale yet, offer an on-sale alert. If they follow an artist or team, offer a new-show alert. If an event is sold out, say you cannot watch resale sites yet and suggest the official resale page of the ticket seller.
@@ -91,6 +92,15 @@ def run_turn(
     ctx = ToolContext(conn=conn, catalog=catalog, handle=handle, conv_id=conv_id, last_user_text=text, now=now,
                       notify_operator=notify_operator, llm=llm, send_later=send_later)
     reply = ""
+    # Fast path: a plain YES to an open proposal is handled by code. No model call, no chance of a wrong amount.
+    open_proposal = conn.execute("SELECT * FROM proposals WHERE conv_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
+                                 (conv_id,)).fetchone()
+    if open_proposal and AFFIRMATIVE.search(text):
+        result = confirm_booking(ctx, open_proposal["id"])
+        if "error" not in result:
+            reply = executors.result_text(result, catalog.venues[open_proposal["venue_id"]], open_proposal)
+            db.add_message(conn, conv_id, "dibs", "assistant", reply)
+            return reply
     for _ in range(config.MAX_TOOL_ROUNDS):
         try:
             msg = llm.chat(messages, SCHEMAS)
@@ -105,6 +115,10 @@ def run_turn(
         for call in calls:
             result = run_tool(ctx, call["function"]["name"], call["function"].get("arguments", "{}"))
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
+            if call["function"]["name"] == "propose_booking" and '"shown_to_user"' in result:
+                reply = json.loads(result)["shown_to_user"]  # the user sees the code's summary, word for word
+        if reply:
+            break
     if not reply:
         reply = "Sorry, I got tangled up there. Can you say that again?"
     db.add_message(conn, conv_id, "dibs", "assistant", reply)

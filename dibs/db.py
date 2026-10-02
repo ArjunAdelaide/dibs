@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS proposals (
     party_size INTEGER NOT NULL,
     deal_id TEXT,
     rate TEXT,
+    shown TEXT,
     notes TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL
@@ -95,6 +96,8 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     if "rate" not in [c[1] for c in conn.execute("PRAGMA table_info(proposals)")]:  # databases from before live rates
         conn.execute("ALTER TABLE proposals ADD COLUMN rate TEXT")
+    if "shown" not in [c[1] for c in conn.execute("PRAGMA table_info(proposals)")]:  # databases from before exact summaries
+        conn.execute("ALTER TABLE proposals ADD COLUMN shown TEXT")
     if "payment_intent" not in [c[1] for c in conn.execute("PRAGMA table_info(bookings)")]:  # databases from before payments
         conn.execute("ALTER TABLE bookings ADD COLUMN amount_cents INTEGER")
         conn.execute("ALTER TABLE bookings ADD COLUMN payment_intent TEXT")
@@ -137,6 +140,12 @@ def history(conn: sqlite3.Connection, conv_id: str, limit: int) -> list[sqlite3.
 def user_messages_since(conn: sqlite3.Connection, handle: str, since_iso: str) -> int:
     return conn.execute("SELECT COUNT(*) FROM messages WHERE handle = ? AND role = 'user' AND created_at > ?",
                         (handle, since_iso)).fetchone()[0]
+
+
+def last_assistant_message(conn: sqlite3.Connection, conv_id: str) -> str:
+    row = conn.execute("SELECT content FROM messages WHERE conv_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1",
+                       (conv_id,)).fetchone()
+    return row["content"] if row else ""
 
 
 def kv_get(conn: sqlite3.Connection, key: str) -> str | None:

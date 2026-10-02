@@ -64,6 +64,48 @@ def send_booking_email(venue: dict, when: datetime, party_size: int, name: str, 
     return "sent"
 
 
+def _when(when: datetime) -> str:
+    return f"{when:%a %-d %b}, {when:%-I:%M}{when:%p}".replace("AM", "am").replace("PM", "pm")
+
+
+def _people(n: int) -> str:
+    return "1 person" if n == 1 else f"{n} people"
+
+
+def proposal_text(venue: dict, when: datetime, party_size: int, rate=None, deal_note: str | None = None) -> str:
+    """The exact booking summary the user approves. Written by code so it always matches what gets booked."""
+    lines = [venue["name"], _when(when), _people(party_size)]
+    if rate:
+        total = total_cents(rate, party_size) / 100
+        lines.append(f"${total:.2f}" if party_size == 1 else f"${rate.price:.2f} each, ${total:.2f} total")
+        ask = f"Reply YES to book and pay ${total:.2f} with your saved card." if payments.enabled() else "Reply YES to book."
+    else:
+        if deal_note:
+            lines.append(deal_note)
+        ask = "Reply YES to book."
+    return "\n".join(lines) + "\n\n" + ask
+
+
+def result_text(result: dict, venue: dict, proposal) -> str:
+    """The reply after a YES, by route. Written by code: no model call, and no wrong amounts."""
+    when = _when(datetime.fromisoformat(proposal["starts_at"]))
+    what = f"{venue['name']}, {when}, {_people(proposal['party_size'])}"
+    if result.get("needs_card"):
+        return ("One quick step first: save a card on Stripe's secure page (card or Apple Pay). Dibs never sees it.\n"
+                f"{result['setup_link']}\n\nThen reply YES and I'll book it.")
+    route = result.get("route")
+    if route == "paid":
+        return (f"Paid: {result['charged']} from your saved card for {what}.\n\n"
+                "I'm completing the booking now and will text you the confirmation. If it can't be completed, you get a full refund.")
+    if route == "link":
+        return f"That slot is open: {what}, {result['price']}.\nFinish on the venue's page. It isn't held until you do:\n{result['booking_link']}"
+    if route == "page":
+        return f"I can't see live times for {venue['name']}. Pick your time and book on their page:\n{result['booking_link']}"
+    if route == "email":
+        return f"I've sent your booking request to {venue['name']}: {when}, {_people(proposal['party_size'])}. I'll text you when they confirm."
+    return f"On it: {what}. I'll text you the confirmation shortly."
+
+
 def total_cents(rate, party_size: int) -> int:
     return round(rate.price * 100) * party_size
 

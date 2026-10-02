@@ -9,7 +9,35 @@ import argparse
 
 from . import db, payments
 from .catalog import Catalog
-from .channels.imessage import send_to_chat
+
+
+def refund_stale_paid(conn, catalog: Catalog, send, now_iso: str | None = None) -> int:
+    """A paid booking that was not completed in time is refunded and the user is told. Keeps the promise in the chat."""
+    from datetime import datetime, timedelta, timezone
+
+    from . import config
+
+    cutoff = (datetime.fromisoformat(now_iso) if now_iso else datetime.now(timezone.utc)) - timedelta(minutes=config.PAID_TIMEOUT_MINUTES)
+    rows = conn.execute(
+        "SELECT b.id, b.payment_intent, b.amount_cents, b.created_at, p.conv_id, p.venue_id FROM bookings b "
+        "JOIN proposals p ON p.id = b.proposal_id WHERE b.status = 'paid_needs_human'").fetchall()
+    done = 0
+    for row in rows:
+        if datetime.fromisoformat(row["created_at"]) > cutoff:
+            continue
+        try:
+            payments.refund(row["payment_intent"])
+        except payments.PaymentError as exc:
+            print(f"ops: refund for booking #{row['id']} failed: {exc}")
+            continue
+        conn.execute("UPDATE bookings SET status = 'refunded', updated_at = ? WHERE id = ?", (db.now_iso(), row["id"]))
+        conn.commit()
+        name = catalog.venues.get(row["venue_id"], {}).get("name", row["venue_id"])
+        text = f"Sorry, I couldn't complete your booking at {name}. I've refunded your ${row['amount_cents'] / 100:.2f} in full."
+        db.add_message(conn, row["conv_id"], "dibs", "assistant", text)
+        send(row["conv_id"], text)
+        done += 1
+    return done
 
 
 def main() -> None:
@@ -21,6 +49,8 @@ def main() -> None:
         p.add_argument("booking_id", type=int)
         p.add_argument("detail")
     args = parser.parse_args()
+
+    from .channels.imessage import send_to_chat  # imported here: the bridge imports this module too
 
     conn = db.connect()
     catalog = Catalog.load()

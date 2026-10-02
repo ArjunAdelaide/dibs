@@ -72,6 +72,8 @@ EVENT_CHECK_HOURS = int(os.getenv("EVENT_CHECK_HOURS", "6"))
 ALERT_INTERVAL_MINUTES = int(os.getenv("ALERT_INTERVAL_MINUTES", "30"))
 # Text "one sec" when a reply takes longer than this many seconds. 0 turns it off.
 HOLDING_AFTER_SECONDS = float(os.getenv("HOLDING_AFTER_SECONDS", "8"))
+# A paid booking that nobody completes in this time is refunded automatically.
+PAID_TIMEOUT_MINUTES = int(os.getenv("PAID_TIMEOUT_MINUTES", "120"))
 PROPOSAL_TTL_MINUTES = 30
 HISTORY_TURNS = 20
 MAX_TOOL_ROUNDS = 6

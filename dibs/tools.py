@@ -17,10 +17,9 @@ from . import alerts, config, db, events, executors, geo, memory, payments
 from .catalog import Catalog, deal_applies
 from .connectors import has_connector, slots_for
 
-AFFIRMATIVE = re.compile(
-    r"^\s*(yes|yep|yeah|yup|y|confirm(ed)?|book it|do it|lock it in|go ahead|ok(ay)?|sure|👍)\b",
-    re.IGNORECASE,
-)
+_YES = r"(yes|yep|yeah|yup|y|ok|okay|sure|confirm|confirmed|go ahead|do it|book it|lock it in|sounds good|👍)"
+# The whole message must be a yes. "ok what about 5pm" or "yes but 3 people" is not a yes.
+AFFIRMATIVE = re.compile(rf"^\s*{_YES}([\s,]+({_YES}|please|thanks|thank you|mate))*[\s.!]*$", re.IGNORECASE)
 PREF_KEYS = {"name", "usual_party_size", "budget", "max_travel_km"}
 DEFAULT_TRAVEL_KM = 15
 MAX_LIVE_LOOKUPS = 6  # venue sites we read for one suggestion
@@ -397,21 +396,18 @@ def propose_booking(ctx: ToolContext, venue_id: str, starts_at: str, party_size:
         slot, found = executors.find_slot(venue, when, rate, party_size)
         if not slot:
             return {"error": "that time, rate or group size is not open on the live feed; call check_availability and offer real slots"}
-        deal_note = f"${found.price:.2f} per person ({found.name})"
-        if payments.enabled():  # the user must see the exact amount before they say yes
-            deal_note += f", total ${executors.total_cents(found, party_size) / 100:.2f} charged to your saved card"
+        deal_note = None
     # One open proposal per conversation keeps "yes" unambiguous.
     ctx.conn.execute("UPDATE proposals SET status = 'superseded' WHERE conv_id = ? AND status = 'pending'", (ctx.conv_id,))
+    found = found if has_connector(venue) else None
+    shown = executors.proposal_text(venue, when, party_size, found, deal_note)
     cur = ctx.conn.execute(
-        "INSERT INTO proposals (conv_id, handle, venue_id, starts_at, party_size, deal_id, rate, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (ctx.conv_id, ctx.handle, venue_id, when.isoformat(), party_size, deal_id, rate, notes, ctx.now.isoformat()),
+        "INSERT INTO proposals (conv_id, handle, venue_id, starts_at, party_size, deal_id, rate, shown, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (ctx.conv_id, ctx.handle, venue_id, when.isoformat(), party_size, deal_id, found.name if found else rate, shown, notes, ctx.now.isoformat()),
     )
     ctx.conn.commit()
-    return {
-        "proposal_id": cur.lastrowid,
-        "summary": f"{venue['name']}, {when.strftime('%a %d %b %I:%M%p')}, {party_size} people" + (f", {deal_note}" if deal_note else ""),
-        "next": "Show the user this summary and ask them to reply YES to book. Do not call confirm_booking until they do.",
-    }
+    return {"proposal_id": cur.lastrowid, "shown_to_user": shown,
+            "next": "The system sends this exact text to the user. Any change (people, time, venue) needs a new propose_booking call."}
 
 
 def confirm_booking(ctx: ToolContext, proposal_id: int) -> dict:
@@ -427,6 +423,9 @@ def confirm_booking(ctx: ToolContext, proposal_id: int) -> dict:
         ctx.conn.execute("UPDATE proposals SET status = 'expired' WHERE id = ?", (proposal_id,))
         ctx.conn.commit()
         return {"error": "proposal expired; propose it again"}
+    # The user may only approve what the system itself showed them, word for word.
+    if not row["shown"] or row["shown"] not in db.last_assistant_message(ctx.conn, ctx.conv_id):
+        return {"error": "the user has not been shown this exact booking; call propose_booking again with the details they want"}
     return executors.execute(ctx, row, ctx.catalog.venues[row["venue_id"]])
 
 

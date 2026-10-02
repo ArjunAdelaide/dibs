@@ -8,7 +8,16 @@ from dibs import db
 from dibs.agent import run_turn
 from dibs.catalog import Catalog, deal_applies
 from dibs.channels.imessage import decode_attributed_body, should_answer
-from dibs.tools import ToolContext, confirm_booking, find_deals, propose_booking
+from dibs.tools import ToolContext, confirm_booking, find_deals
+from dibs.tools import propose_booking as _propose_booking
+
+
+def propose_booking(ctx, *args, **kwargs):
+    """Propose, then record the summary as sent, the way a real turn does."""
+    out = _propose_booking(ctx, *args, **kwargs)
+    if "shown_to_user" in out:
+        db.add_message(ctx.conn, ctx.conv_id, "dibs", "assistant", out["shown_to_user"])
+    return out
 from scripts.fingerprint import detect
 
 TZ = ZoneInfo("Australia/Adelaide")
@@ -101,16 +110,11 @@ class ScriptedLLM:
 
 def test_agent_turns_end_to_end(ctx):
     alerts = []
-    llm = ScriptedLLM([
-        ("propose_booking", {"venue_id": "test-bowl", "starts_at": "2026-10-07T16:00", "party_size": 4}),
-        "Test Bowl, Wed 4pm, 4 of you. Reply YES to book.",
-        ("confirm_booking", {"proposal_id": 1}),
-        "Locked in, confirmation coming shortly.",
-    ])
+    llm = ScriptedLLM([("propose_booking", {"venue_id": "test-bowl", "starts_at": "2026-10-07T16:00", "party_size": 4})])
     first = run_turn(ctx.conn, ctx.catalog, llm, "c1", "+61400000001", "bowling wed 4pm for 4", alerts.append, now=NOW)
-    assert "YES" in first
-    second = run_turn(ctx.conn, ctx.catalog, llm, "c1", "+61400000001", "yes", alerts.append, now=NOW)
-    assert "Locked in" in second and len(alerts) == 1
+    assert first == "Test Bowl\nWed 7 Oct, 4:00pm\n4 people\n\nReply YES to book."  # written by code, not the model
+    second = run_turn(ctx.conn, ctx.catalog, llm, "c1", "+61400000001", "yes", alerts.append, now=NOW)  # no model call left: code handles it
+    assert "On it: Test Bowl, Wed 7 Oct, 4:00pm, 4 people" in second and len(alerts) == 1
     assert ctx.conn.execute("SELECT status FROM bookings").fetchone()["status"] == "needs_human"
 
 
@@ -501,7 +505,8 @@ def paying(live, monkeypatch):
 
 def test_payment_flow_card_then_charge(paying):
     out = propose_booking(paying, "mini", "2026-10-07T09:10", 4, rate="SHANX Single")
-    assert "total $72.00 charged to your saved card" in out["summary"]  # 4 x $18, shown before the yes
+    assert "$18.00 each, $72.00 total" in out["shown_to_user"]  # 4 x $18, shown before the yes
+    assert "Reply YES to book and pay $72.00 with your saved card." in out["shown_to_user"]
     paying.last_user_text = "yes"
     first = confirm_booking(paying, out["proposal_id"])
     assert first["needs_card"] and "stripe" in first["setup_link"] and paying.state["charges"] == []
@@ -552,3 +557,44 @@ def test_named_activity_needs_no_location(live):
     out = suggest_ideas(live, "2026-10-07", "09:10", 2, category="mini_golf")  # no location saved
     assert out["ideas"][0]["name"] == "Mini Golf" and out["ideas"][0]["open_slot"] == "09:10"
     assert "distance_km" not in out["ideas"][0] and "09:20" in out["ideas"][0]["other_open_times"]
+
+
+# --- the user only pays for exactly what they were shown ---
+
+def test_changed_details_cannot_be_charged_at_the_old_amount(paying):
+    """The real bug: Dibs proposed 2 people, the model then described "1 person, $18" in its own words, and YES charged for 2."""
+    paying.state["card"] = "pm_test"
+    llm = ScriptedLLM([
+        ("propose_booking", {"venue_id": "mini", "starts_at": "2026-10-07T09:10", "party_size": 2, "rate": "SHANX Single"}),
+        "Mini Golf, 1 person, $18. Reply YES to book this slot with your saved card.",  # model restates, no new proposal
+        ("propose_booking", {"venue_id": "mini", "starts_at": "2026-10-07T09:10", "party_size": 1, "rate": "SHANX Single"}),
+    ])
+    turn = lambda text: run_turn(paying.conn, paying.catalog, llm, "c1", paying.handle, text, paying.alerts.append, now=NOW)  # noqa: E731
+    assert "$36.00 total" in turn("mini golf wed 9:10 for 2")
+    turn("it's just one person")                      # the model's own words go out; the open proposal is still for 2
+    reply = turn("yes")                               # so this YES must NOT charge $36
+    assert paying.state["charges"] == [] and "$18.00" in reply and "1 person" in reply  # a fresh, exact proposal instead
+    assert "Paid: $18.00" in turn("yes") and paying.state["charges"] == [1800]
+
+
+def test_yes_must_be_the_whole_message(ctx):
+    from dibs.tools import AFFIRMATIVE
+    for yes in ("yes", "Yes ", "yep!", "ok", "yes please", "book it", "Yes, book it thanks", "👍"):
+        assert AFFIRMATIVE.search(yes), yes
+    for not_yes in ("ok what about 5pm", "yes but make it 3 people", "yesterday was fun", "sure, is parking free?", "no"):
+        assert not AFFIRMATIVE.search(not_yes), not_yes
+
+
+def test_stale_paid_booking_is_refunded(paying):
+    from dibs import ops
+    paying.state["card"] = "pm_test"
+    pid = propose_booking(paying, "mini", "2026-10-07T09:10", 2, rate="SHANX Single")["proposal_id"]
+    paying.last_user_text = "yes"
+    assert confirm_booking(paying, pid)["route"] == "paid"
+    sent = []
+    send = lambda conv, text: sent.append(text)  # noqa: E731
+    assert ops.refund_stale_paid(paying.conn, paying.catalog, send) == 0  # still inside the time limit
+    later = "2099-01-01T00:00:00+00:00"
+    assert ops.refund_stale_paid(paying.conn, paying.catalog, send, now_iso=later) == 1
+    assert paying.state["refunds"] == ["pi_test_1"] and "refunded your $36.00" in sent[0]
+    assert ops.refund_stale_paid(paying.conn, paying.catalog, send, now_iso=later) == 0  # only once
