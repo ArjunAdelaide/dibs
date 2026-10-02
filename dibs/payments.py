@@ -45,17 +45,25 @@ def saved_card(conn: sqlite3.Connection, handle: str) -> str | None:
     """The id of the user's saved card, or None. Asked from Stripe each time, so no webhook is needed."""
     if not db.get_prefs(conn, handle).get("stripe_customer"):
         return None
-    cards = _stripe().PaymentMethod.list(customer=customer_id(conn, handle), type="card", limit=1)
+    stripe = _stripe()
+    try:
+        cards = stripe.PaymentMethod.list(customer=customer_id(conn, handle), type="card", limit=1)
+    except stripe.StripeError as exc:
+        raise PaymentError(f"could not reach Stripe ({type(exc).__name__})") from exc
     return cards.data[0].id if cards.data else None
 
 
 def setup_link(conn: sqlite3.Connection, handle: str) -> str:
     """A Stripe-hosted page where the user saves a card for later charges."""
-    session = _stripe().checkout.Session.create(
-        mode="setup", customer=customer_id(conn, handle), currency=config.CURRENCY,
-        payment_method_types=["card"],  # Apple Pay and Google Pay show up on this page for card
-        success_url=config.PAYMENT_RETURN_URL, cancel_url=config.PAYMENT_RETURN_URL,
-    )
+    stripe = _stripe()
+    try:
+        # Payment methods (card, Apple Pay, Google Pay) come from the Stripe Dashboard settings.
+        session = stripe.checkout.Session.create(
+            mode="setup", customer=customer_id(conn, handle), currency=config.CURRENCY,
+            success_url=config.PAYMENT_RETURN_URL, cancel_url=config.PAYMENT_RETURN_URL,
+        )
+    except stripe.StripeError as exc:
+        raise PaymentError(f"could not open the card page ({type(exc).__name__})") from exc
     return session.url
 
 
@@ -71,14 +79,21 @@ def charge(conn: sqlite3.Connection, handle: str, amount_cents: int, description
         intent = stripe.PaymentIntent.create(
             amount=amount_cents, currency=config.CURRENCY, customer=customer_id(conn, handle), payment_method=card,
             off_session=True, confirm=True, description=description, metadata={"dibs_proposal": str(proposal_id)},
-            idempotency_key=f"dibs-proposal-{proposal_id}",
+            automatic_payment_methods={"enabled": True, "allow_redirects": "never"},
+            idempotency_key=f"dibs-{handle}-proposal-{proposal_id}",
         )
-    except stripe.error.CardError as exc:
+    except stripe.CardError as exc:
         raise PaymentError(f"the card was declined ({exc.code})") from exc
+    except stripe.StripeError as exc:
+        raise PaymentError(f"Stripe could not take the payment ({type(exc).__name__})") from exc
     if intent.status != "succeeded":
         raise PaymentError(f"the payment needs more steps ({intent.status})")
     return intent.id
 
 
 def refund(payment_intent: str) -> None:
-    _stripe().Refund.create(payment_intent=payment_intent)
+    stripe = _stripe()
+    try:
+        stripe.Refund.create(payment_intent=payment_intent)
+    except stripe.StripeError as exc:
+        raise PaymentError(f"refund failed ({type(exc).__name__}): refund it in the Stripe Dashboard") from exc
