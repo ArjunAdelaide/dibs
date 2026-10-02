@@ -1,0 +1,12 @@
+[
+  {
+    "id": "example-weekday-lanes",
+    "venue_id": "zone-bowling",
+    "title": "EXAMPLE ONLY: 2 games + shoes, weekday afternoons",
+    "price": "$X per person",
+    "conditions": {"days": ["mon", "tue", "wed", "thu"], "start": "12:00", "end": "17:00", "min_party": 2, "max_party": 8},
+    "expires": "2026-12-31",
+    "source_url": "https://venue-website/specials",
+    "checked_at": "2026-10-02"
+  }
+]

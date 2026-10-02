@@ -1,0 +1,6 @@
+.venv/
+.env
+data/dibs.db
+__pycache__/
+.pytest_cache/
+data/memory/
