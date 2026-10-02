@@ -61,7 +61,8 @@ PAYMENTS_LIVE = os.getenv("PAYMENTS_LIVE", "0") == "1"
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 CURRENCY = os.getenv("DIBS_CURRENCY", "aud")
 MAX_CHARGE_CENTS = int(os.getenv("MAX_CHARGE_CENTS", "30000"))
-PAYMENT_RETURN_URL = os.getenv("PAYMENT_RETURN_URL", "https://github.com/ArjunAdelaide/dibs#card-saved")
+# The page shown after the card is saved (docs/card-saved.html, served by GitHub Pages). ?to= is the agent's address.
+PAYMENT_RETURN_URL = os.getenv("PAYMENT_RETURN_URL", "https://arjunadelaide.github.io/dibs/card-saved.html?to=iamdibsagent@gmail.com")
 
 # Free key from developer.ticketmaster.com. Without it, event search uses data/events.json only.
 TICKETMASTER_API_KEY = os.getenv("TICKETMASTER_API_KEY", "")

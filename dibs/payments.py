@@ -15,6 +15,9 @@ import sqlite3
 from . import config, db
 
 
+CHARGEABLE = ("card", "link")  # saved payment method types that can be charged after a YES
+
+
 class PaymentError(Exception):
     pass
 
@@ -42,15 +45,19 @@ def customer_id(conn: sqlite3.Connection, handle: str) -> str:
 
 
 def saved_card(conn: sqlite3.Connection, handle: str) -> str | None:
-    """The id of the user's saved card, or None. Asked from Stripe each time, so no webhook is needed."""
+    """The id of the user's saved payment method, or None. Asked from Stripe each time, so no webhook is needed.
+
+    The Stripe page can save a plain card (also Apple Pay and Google Pay) or a Link account: both can be charged later.
+    """
     if not db.get_prefs(conn, handle).get("stripe_customer"):
         return None
     stripe = _stripe()
     try:
-        cards = stripe.PaymentMethod.list(customer=customer_id(conn, handle), type="card", limit=1)
+        methods = stripe.Customer.list_payment_methods(customer_id(conn, handle), limit=10)
     except stripe.StripeError as exc:
         raise PaymentError(f"could not reach Stripe ({type(exc).__name__})") from exc
-    return cards.data[0].id if cards.data else None
+    usable = [m for m in methods.data if m.type in CHARGEABLE]
+    return usable[0].id if usable else None
 
 
 def setup_link(conn: sqlite3.Connection, handle: str) -> str:
