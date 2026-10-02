@@ -208,6 +208,12 @@ def run(poll_seconds: float = 1.0) -> None:
                 print(f"(ignored a message from {row['handle']}: {why})")
                 continue
             print(f"<- {row['handle']}: {text}")
+            if config.OPERATOR_HANDLE and row["handle"] == config.OPERATOR_HANDLE and not is_group:
+                answer = ops.operator_command(conn, catalog, send_to_chat, text)  # "booked 3 ref", "failed 3 why", "jobs"
+                if answer is not None:
+                    print(f"-> (operator) {answer}")
+                    send_to_chat(row["chat_guid"], answer)
+                    continue
             canned = gate(conn, row["handle"], text)
             if canned is not None:
                 if canned:

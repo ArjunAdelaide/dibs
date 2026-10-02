@@ -487,37 +487,60 @@ from dibs import payments  # noqa: E402
 def paying(live, monkeypatch):
     monkeypatch.setattr("dibs.config.PAYMENTS_ENABLED", True)
     monkeypatch.setattr("dibs.config.STRIPE_SECRET_KEY", "sk_test_x")
-    state = {"card": None, "charges": [], "refunds": []}
-    monkeypatch.setattr("dibs.payments.saved_card", lambda conn, handle: state["card"])
+    state = {"card": None, "holds": [], "captured": [], "released": []}
+    monkeypatch.setattr("dibs.payments.saved_method", lambda conn, handle: (state["card"], "Visa ending 4242") if state["card"] else None)
     monkeypatch.setattr("dibs.payments.setup_link", lambda conn, handle: "https://checkout.stripe.test/setup")
 
-    def fake_charge(conn, handle, amount_cents, description, proposal_id):
+    def fake_hold(conn, handle, amount_cents, description, proposal_id):
         if state.get("decline"):
             raise payments.PaymentError("the card was declined (card_declined)")
-        state["charges"].append(amount_cents)
+        state["holds"].append(amount_cents)
         return "pi_test_1"
 
-    monkeypatch.setattr("dibs.payments.charge", fake_charge)
-    monkeypatch.setattr("dibs.payments.refund", lambda intent: state["refunds"].append(intent))
+    monkeypatch.setattr("dibs.payments.hold", fake_hold)
+    monkeypatch.setattr("dibs.payments.capture", lambda intent: state["captured"].append(intent))
+    monkeypatch.setattr("dibs.payments.release", lambda intent: state["released"].append(intent) or "released")
     live.state = state
     return live
 
 
-def test_payment_flow_card_then_charge(paying):
+def test_payment_flow_card_then_hold_then_capture(paying):
+    from dibs import ops
     out = propose_booking(paying, "mini", "2026-10-07T09:10", 4, rate="SHANX Single")
     assert "$18.00 each, $72.00 total" in out["shown_to_user"]  # 4 x $18, shown before the yes
-    assert "Reply YES to book and pay $72.00 with your saved card." in out["shown_to_user"]
+    assert "Reply YES to book and pay $72.00 (you'll save a card first)." in out["shown_to_user"]
     paying.last_user_text = "yes"
     first = confirm_booking(paying, out["proposal_id"])
-    assert first["needs_card"] and "stripe" in first["setup_link"] and paying.state["charges"] == []
+    assert first["needs_card"] and paying.state["holds"] == []
     assert paying.conn.execute("SELECT status FROM proposals").fetchone()["status"] == "pending"  # still open for the next yes
+    # the card step repeats the exact summary, so the next YES approves this same booking
+    prop = paying.conn.execute("SELECT * FROM proposals").fetchone()
+    card_step = executors.result_text(first, paying.catalog.venues["mini"], prop)
+    assert "stripe" in card_step and prop["shown"] in card_step
+    db.add_message(paying.conn, paying.conv_id, "dibs", "assistant", card_step)
     paying.state["card"] = "pm_test"
     second = confirm_booking(paying, out["proposal_id"])
-    assert second["route"] == "paid" and second["charged"] == "$72.00" and paying.state["charges"] == [7200]
-    row = paying.conn.execute("SELECT status, amount_cents, payment_intent FROM bookings").fetchone()
-    assert tuple(row) == ("paid_needs_human", 7200, "pi_test_1")
-    assert "PAID booking" in paying.alerts[0] and "$72.00" in paying.alerts[0]
-    assert "error" in confirm_booking(paying, out["proposal_id"])  # a second yes cannot charge again
+    assert second["route"] == "paid" and second["held"] == "$72.00" and paying.state["holds"] == [7200]
+    assert "hold of $72.00 on Visa ending 4242" in executors.result_text(second, paying.catalog.venues["mini"], prop)
+    assert paying.state["captured"] == []  # nothing is taken until the booking is confirmed
+    assert "HELD" in paying.alerts[0] and "reply: booked 1" in paying.alerts[0]
+    assert "error" in confirm_booking(paying, out["proposal_id"])  # a second yes cannot hold again
+
+    # the operator completes it by text: money is taken now, and the user is told
+    sent = []
+    send = lambda conv, text: sent.append(text)  # noqa: E731
+    assert ops.operator_command(paying.conn, paying.catalog, send, "what's on tonight?") is None  # not a command
+    assert "#1 Mini Golf" in ops.operator_command(paying.conn, paying.catalog, send, "jobs")
+    reply = ops.operator_command(paying.conn, paying.catalog, send, "Booked 1 Ref ABC123")
+    assert reply.startswith("Done") and paying.state["captured"] == ["pi_test_1"]
+    assert sent[0] == "You're booked at Mini Golf. Ref ABC123. I've charged $72.00 to your saved card."
+    assert "already booked" in ops.operator_command(paying.conn, paying.catalog, send, "failed 1 oops")  # cannot be closed twice
+
+
+def test_saved_card_is_named_in_the_summary(paying):
+    paying.state["card"] = "pm_test"
+    out = propose_booking(paying, "mini", "2026-10-07T09:10", 2, rate="SHANX Single")
+    assert "Reply YES to book and pay $36.00 with Visa ending 4242." in out["shown_to_user"]
 
 
 def test_declined_card_books_nothing(paying):
@@ -528,13 +551,33 @@ def test_declined_card_books_nothing(paying):
     assert "payment failed" in out["error"] and paying.conn.execute("SELECT COUNT(*) FROM bookings").fetchone()[0] == 0
 
 
+def test_operator_fails_a_booking_and_user_cancels_one(paying):
+    from dibs import ops
+    from dibs.tools import cancel_booking, my_bookings
+    paying.state["card"] = "pm_test"
+    sent = []
+    send = lambda conv, text: sent.append(text)  # noqa: E731
+    for _ in range(2):
+        pid = propose_booking(paying, "mini", "2026-10-07T09:10", 2, rate="SHANX Single")["proposal_id"]
+        paying.last_user_text = "yes"
+        confirm_booking(paying, pid)
+    assert ops.operator_command(paying.conn, paying.catalog, send, "failed 1 the slot was taken").startswith("Done")
+    assert "Couldn't lock in Mini Golf: the slot was taken. The $36.00 hold on your card is released." in sent[0]
+    out = cancel_booking(paying)  # the user cancels booking 2 in the chat
+    assert out["cancelled"] and "hold on the card is released" in out["tell_user"]
+    assert paying.state["released"] == ["pi_test_1", "pi_test_1"] and paying.state["captured"] == []
+    assert "cancelled booking #2" in paying.alerts[-1]
+    assert [b["status"] for b in my_bookings(paying)["bookings"]] == ["cancelled", "failed"]
+    assert "error" in cancel_booking(paying)  # nothing left to cancel
+
+
 def test_live_key_is_refused_and_amount_is_capped(monkeypatch, ctx):
     monkeypatch.setattr("dibs.config.STRIPE_SECRET_KEY", "sk_live_x")
     with pytest.raises(payments.PaymentError):
         payments._stripe()
     monkeypatch.setattr("dibs.config.STRIPE_SECRET_KEY", "sk_test_x")
     with pytest.raises(payments.PaymentError):
-        payments.charge(ctx.conn, ctx.handle, 10_000_000, "too much", 1)
+        payments.hold(ctx.conn, ctx.handle, 10_000_000, "too much", 1)
 
 
 def test_event_search_kinds_and_sessions(ctx, calendar, monkeypatch):
@@ -573,8 +616,8 @@ def test_changed_details_cannot_be_charged_at_the_old_amount(paying):
     assert "$36.00 total" in turn("mini golf wed 9:10 for 2")
     turn("it's just one person")                      # the model's own words go out; the open proposal is still for 2
     reply = turn("yes")                               # so this YES must NOT charge $36
-    assert paying.state["charges"] == [] and "$18.00" in reply and "1 person" in reply  # a fresh, exact proposal instead
-    assert "Paid: $18.00" in turn("yes") and paying.state["charges"] == [1800]
+    assert paying.state["holds"] == [] and "$18.00" in reply and "1 person" in reply  # a fresh, exact proposal instead
+    assert "hold of $18.00" in turn("yes") and paying.state["holds"] == [1800]
 
 
 def test_yes_must_be_the_whole_message(ctx):
@@ -585,7 +628,7 @@ def test_yes_must_be_the_whole_message(ctx):
         assert not AFFIRMATIVE.search(not_yes), not_yes
 
 
-def test_stale_paid_booking_is_refunded(paying):
+def test_stale_held_booking_is_released(paying):
     from dibs import ops
     paying.state["card"] = "pm_test"
     pid = propose_booking(paying, "mini", "2026-10-07T09:10", 2, rate="SHANX Single")["proposal_id"]
@@ -596,5 +639,5 @@ def test_stale_paid_booking_is_refunded(paying):
     assert ops.refund_stale_paid(paying.conn, paying.catalog, send) == 0  # still inside the time limit
     later = "2099-01-01T00:00:00+00:00"
     assert ops.refund_stale_paid(paying.conn, paying.catalog, send, now_iso=later) == 1
-    assert paying.state["refunds"] == ["pi_test_1"] and "refunded your $36.00" in sent[0]
+    assert paying.state["released"] == ["pi_test_1"] and "$36.00 hold on your card is released" in sent[0]
     assert ops.refund_stale_paid(paying.conn, paying.catalog, send, now_iso=later) == 0  # only once

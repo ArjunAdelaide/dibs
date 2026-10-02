@@ -400,7 +400,14 @@ def propose_booking(ctx: ToolContext, venue_id: str, starts_at: str, party_size:
     # One open proposal per conversation keeps "yes" unambiguous.
     ctx.conn.execute("UPDATE proposals SET status = 'superseded' WHERE conv_id = ? AND status = 'pending'", (ctx.conv_id,))
     found = found if has_connector(venue) else None
-    shown = executors.proposal_text(venue, when, party_size, found, deal_note)
+    card = None
+    if found and payments.enabled():  # name the card that will be used, so there are no surprises
+        try:
+            method = payments.saved_method(ctx.conn, ctx.handle)
+            card = method[1] if method else None
+        except payments.PaymentError:
+            card = None
+    shown = executors.proposal_text(venue, when, party_size, found, deal_note, card)
     cur = ctx.conn.execute(
         "INSERT INTO proposals (conv_id, handle, venue_id, starts_at, party_size, deal_id, rate, shown, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (ctx.conv_id, ctx.handle, venue_id, when.isoformat(), party_size, deal_id, found.name if found else rate, shown, notes, ctx.now.isoformat()),
@@ -427,6 +434,34 @@ def confirm_booking(ctx: ToolContext, proposal_id: int) -> dict:
     if not row["shown"] or row["shown"] not in db.last_assistant_message(ctx.conn, ctx.conv_id):
         return {"error": "the user has not been shown this exact booking; call propose_booking again with the details they want"}
     return executors.execute(ctx, row, ctx.catalog.venues[row["venue_id"]])
+
+
+def cancel_booking(ctx: ToolContext) -> dict:
+    """Cancel the user's latest booking in this chat and give back any held or paid amount."""
+    from . import ops
+
+    return ops.cancel_by_user(ctx.conn, ctx.catalog, ctx.handle, ctx.conv_id, ctx.notify_operator)
+
+
+def my_bookings(ctx: ToolContext) -> dict:
+    rows = ctx.conn.execute(
+        "SELECT b.id, b.status, b.reference, b.amount_cents, p.venue_id, p.starts_at, p.party_size FROM bookings b "
+        "JOIN proposals p ON p.id = b.proposal_id WHERE p.conv_id = ? AND p.handle = ? ORDER BY b.id DESC LIMIT 5",
+        (ctx.conv_id, ctx.handle)).fetchall()
+    words = {"paid_needs_human": "being completed (amount held, not charged)", "needs_human": "being completed",
+             "requested": "requested from the venue", "link_sent": "link sent, finish on the venue page", "booked": "confirmed"}
+    return {"bookings": [{"venue": ctx.catalog.venues.get(r["venue_id"], {}).get("name", r["venue_id"]), "when": r["starts_at"][:16],
+                          "people": r["party_size"], "status": words.get(r["status"], r["status"]), "reference": r["reference"] or None,
+                          "amount": f"${r['amount_cents'] / 100:.2f}" if r["amount_cents"] else None} for r in rows]}
+
+
+def remove_card(ctx: ToolContext) -> dict:
+    if not payments.enabled():
+        return {"error": "payments are not turned on"}
+    try:
+        return {"removed": payments.remove_saved_methods(ctx.conn, ctx.handle)}
+    except payments.PaymentError as exc:
+        return {"error": str(exc)}
 
 
 def cancel_proposal(ctx: ToolContext, proposal_id: int) -> dict:
@@ -456,6 +491,9 @@ HANDLERS = {
     "propose_booking": propose_booking,
     "confirm_booking": confirm_booking,
     "cancel_proposal": cancel_proposal,
+    "cancel_booking": cancel_booking,
+    "my_bookings": my_bookings,
+    "remove_card": remove_card,
 }
 
 
@@ -518,8 +556,11 @@ SCHEMAS = [
          "notes": {"type": "string"}}, ["venue_id", "starts_at", "party_size"]),
     _fn("confirm_booking", "Book a proposal. Only call when the user's latest message says yes to it.",
         {"proposal_id": {"type": "integer"}}, ["proposal_id"]),
-    _fn("cancel_proposal", "Drop a pending proposal the user no longer wants.",
+    _fn("cancel_proposal", "Drop a pending proposal the user no longer wants (before they said yes).",
         {"proposal_id": {"type": "integer"}}, ["proposal_id"]),
+    _fn("cancel_booking", "The user wants to cancel a booking they already said yes to. Cancels the latest one and returns any held or paid amount.", {}, []),
+    _fn("my_bookings", "The user's recent bookings and their status.", {}, []),
+    _fn("remove_card", "Delete the user's saved card from Stripe when they ask.", {}, []),
 ]
 
 

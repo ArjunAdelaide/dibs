@@ -72,13 +72,14 @@ def _people(n: int) -> str:
     return "1 person" if n == 1 else f"{n} people"
 
 
-def proposal_text(venue: dict, when: datetime, party_size: int, rate=None, deal_note: str | None = None) -> str:
+def proposal_text(venue: dict, when: datetime, party_size: int, rate=None, deal_note: str | None = None, card: str | None = None) -> str:
     """The exact booking summary the user approves. Written by code so it always matches what gets booked."""
+    pay_with = f" with {card}" if card else " (you'll save a card first)"
     lines = [venue["name"], _when(when), _people(party_size)]
     if rate:
         total = total_cents(rate, party_size) / 100
         lines.append(f"${total:.2f}" if party_size == 1 else f"${rate.price:.2f} each, ${total:.2f} total")
-        ask = f"Reply YES to book and pay ${total:.2f} with your saved card." if payments.enabled() else "Reply YES to book."
+        ask = f"Reply YES to book and pay ${total:.2f}{pay_with}." if payments.enabled() else "Reply YES to book."
     else:
         if deal_note:
             lines.append(deal_note)
@@ -90,13 +91,13 @@ def result_text(result: dict, venue: dict, proposal) -> str:
     """The reply after a YES, by route. Written by code: no model call, and no wrong amounts."""
     when = _when(datetime.fromisoformat(proposal["starts_at"]))
     what = f"{venue['name']}, {when}, {_people(proposal['party_size'])}"
-    if result.get("needs_card"):
+    if result.get("needs_card"):  # the summary is repeated so the next YES approves exactly this booking
         return ("One quick step first: save a card on Stripe's secure page (card or Apple Pay). Dibs never sees it.\n"
-                f"{result['setup_link']}\n\nThen reply YES and I'll book it.")
+                f"{result['setup_link']}\n\nThen come back here:\n\n{proposal['shown']}")
     route = result.get("route")
     if route == "paid":
-        return (f"Paid: {result['charged']} from your saved card for {what}.\n\n"
-                "I'm completing the booking now and will text you the confirmation. If it can't be completed, you get a full refund.")
+        return (f"On it: {what}.\n\nI've put a hold of {result['held']} on {result['card']}. "
+                "You're only charged when the booking is confirmed. I'll text you as soon as it is.")
     if route == "link":
         return f"That slot is open: {what}, {result['price']}.\nFinish on the venue's page. It isn't held until you do:\n{result['booking_link']}"
     if route == "page":
@@ -111,30 +112,27 @@ def total_cents(rate, party_size: int) -> int:
 
 
 def pay_and_hand_over(ctx, proposal, venue: dict, rate, record) -> dict:
-    """Charge the user's saved card for the exact total, then hand the paid booking to the operator.
+    """Hold the exact total on the user's saved card, then hand the booking to the operator.
 
-    Until Dibs can pay venues by itself, a person completes the booking on the venue site.
+    The money is only taken when the booking is confirmed. Until Dibs can pay venues by itself,
+    a person completes the booking on the venue site.
     """
     total = total_cents(rate, proposal["party_size"])
     try:
-        if not payments.saved_card(ctx.conn, ctx.handle):
-            return {"needs_card": True, "setup_link": payments.setup_link(ctx.conn, ctx.handle),
-                    "status": "NOT booked and NOT charged",
-                    "tell_user": "Send this link on its own line. Say: save a card once on Stripe's secure page (card or Apple Pay), "
-                                 "then reply YES again and you will book it."}
-        intent = payments.charge(ctx.conn, ctx.handle, total, f"{venue['name']} {proposal['starts_at']} x{proposal['party_size']}", proposal["id"])
+        method = payments.saved_method(ctx.conn, ctx.handle)
+        if not method:
+            return {"needs_card": True, "setup_link": payments.setup_link(ctx.conn, ctx.handle), "status": "NOT booked and NOT charged"}
+        intent = payments.hold(ctx.conn, ctx.handle, total, f"{venue['name']} {proposal['starts_at']} x{proposal['party_size']}", proposal["id"])
     except payments.PaymentError as exc:
         return {"error": f"payment failed: {exc}. Nothing was booked. Tell the user plainly and offer the venue link instead: {rate.url}"}
     booking_id = record("paid_needs_human", total, intent)
     ctx.notify_operator(
-        f"[dibs] PAID booking #{booking_id}: ${total / 100:.2f} from {ctx.handle} for {venue['name']} {proposal['starts_at']} "
-        f"x{proposal['party_size']} ({rate.name}). Book it here: {rate.url} Then run: python -m dibs.ops booked {booking_id} <reference> "
-        f"(or: python -m dibs.ops failed {booking_id} <reason>, which refunds)."
+        f"[dibs] Booking #{booking_id}: ${total / 100:.2f} HELD from {ctx.handle} for {venue['name']} {proposal['starts_at'][:16]} "
+        f"x{proposal['party_size']} ({rate.name}). Book it here: {rate.url}\n"
+        f"Then reply: booked {booking_id} <reference>   or: failed {booking_id} <reason>"
     )
-    return {"booking_id": booking_id, "route": "paid", "charged": f"${total / 100:.2f}",
-            "status": "paid; the booking is being completed and is NOT confirmed yet",
-            "tell_user": "Say the amount charged to their saved card, that the booking is being completed now, and that you "
-                         "will text the confirmation. If it cannot be completed they get a full refund."}
+    return {"booking_id": booking_id, "route": "paid", "held": f"${total / 100:.2f}", "card": method[1],
+            "status": "amount held; the booking is being completed and is NOT confirmed yet"}
 
 
 def execute(ctx, proposal, venue: dict) -> dict:
@@ -173,7 +171,7 @@ def execute(ctx, proposal, venue: dict) -> dict:
         send_booking_email(venue, when, proposal["party_size"], prefs["name"], ctx.handle, proposal["notes"])
         booking_id = record("requested")
         ctx.notify_operator(f"[dibs] Booking #{booking_id}: emailed {venue['name']} for {ctx.handle}, "
-                            f"{proposal['starts_at']} x{proposal['party_size']}. When they reply: python -m dibs.ops booked {booking_id} <reference>")
+                            f"{proposal['starts_at'][:16]} x{proposal['party_size']}. When they answer, reply: booked {booking_id} <reference>   or: failed {booking_id} <reason>")
         return {"booking_id": booking_id, "route": "email",
                 "status": "requested from the venue, NOT confirmed yet",
                 "tell_user": "Say the booking request went to the venue by email and you will text when the venue confirms."}
@@ -187,9 +185,9 @@ def execute(ctx, proposal, venue: dict) -> dict:
     booking_id = record("needs_human")
     ctx.notify_operator(
         f"[dibs] Booking #{booking_id} for {ctx.handle} ({prefs.get('name', 'no name')}): {venue['name']} "
-        f"{proposal['starts_at']} x{proposal['party_size']}{' deal ' + proposal['deal_id'] if proposal['deal_id'] else ''}. "
-        f"Book via {venue.get('booking_url') or venue.get('phone') or venue.get('website')}. "
-        f"Then run: python -m dibs.ops booked {booking_id} <reference>"
+        f"{proposal['starts_at'][:16]} x{proposal['party_size']}{' deal ' + proposal['deal_id'] if proposal['deal_id'] else ''}. "
+        f"Book via {venue.get('booking_url') or venue.get('phone') or venue.get('website')}.\n"
+        f"Then reply: booked {booking_id} <reference>   or: failed {booking_id} <reason>"
     )
     return {"booking_id": booking_id, "route": "concierge",
             "tell_user": "Request is with our team; they will text the confirmation shortly."}

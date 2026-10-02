@@ -6,7 +6,8 @@ sees or stores card numbers: Stripe holds them.
 
 Safety, enforced here:
     - test keys only, unless PAYMENTS_LIVE=1 is set on purpose
-    - one charge per proposal (idempotency key)
+    - the amount is only held at YES; it is taken when the booking is confirmed
+    - one hold per proposal (idempotency key)
     - no charge above MAX_CHARGE_CENTS
 """
 
@@ -44,10 +45,10 @@ def customer_id(conn: sqlite3.Connection, handle: str) -> str:
     return customer.id
 
 
-def saved_card(conn: sqlite3.Connection, handle: str) -> str | None:
-    """The id of the user's saved payment method, or None. Asked from Stripe each time, so no webhook is needed.
+def saved_method(conn: sqlite3.Connection, handle: str) -> tuple[str, str] | None:
+    """(id, label) of the user's saved payment method, or None. Asked from Stripe each time, so no webhook is needed.
 
-    The Stripe page can save a plain card (also Apple Pay and Google Pay) or a Link account: both can be charged later.
+    The Stripe page can save a plain card (also Apple Pay and Google Pay) or a Link account: both can be held and charged later.
     """
     if not db.get_prefs(conn, handle).get("stripe_customer"):
         return None
@@ -56,8 +57,31 @@ def saved_card(conn: sqlite3.Connection, handle: str) -> str | None:
         methods = stripe.Customer.list_payment_methods(customer_id(conn, handle), limit=10)
     except stripe.StripeError as exc:
         raise PaymentError(f"could not reach Stripe ({type(exc).__name__})") from exc
-    usable = [m for m in methods.data if m.type in CHARGEABLE]
-    return usable[0].id if usable else None
+    for m in methods.data:
+        if m.type == "card":
+            return m.id, f"{m.card.brand.title()} ending {m.card.last4}"
+        if m.type == "link":
+            return m.id, "your Link account"
+    return None
+
+
+def saved_card(conn: sqlite3.Connection, handle: str) -> str | None:
+    method = saved_method(conn, handle)
+    return method[0] if method else None
+
+
+def remove_saved_methods(conn: sqlite3.Connection, handle: str) -> int:
+    """Delete every saved payment method for this user at Stripe."""
+    if not db.get_prefs(conn, handle).get("stripe_customer"):
+        return 0
+    stripe = _stripe()
+    try:
+        methods = stripe.Customer.list_payment_methods(customer_id(conn, handle), limit=20).data
+        for m in methods:
+            stripe.PaymentMethod.detach(m.id)
+    except stripe.StripeError as exc:
+        raise PaymentError(f"could not remove the card ({type(exc).__name__})") from exc
+    return len(methods)
 
 
 def setup_link(conn: sqlite3.Connection, handle: str) -> str:
@@ -74,8 +98,11 @@ def setup_link(conn: sqlite3.Connection, handle: str) -> str:
     return session.url
 
 
-def charge(conn: sqlite3.Connection, handle: str, amount_cents: int, description: str, proposal_id: int) -> str:
-    """Charge the saved card. Returns the PaymentIntent id, or raises PaymentError with a reason for the user."""
+def hold(conn: sqlite3.Connection, handle: str, amount_cents: int, description: str, proposal_id: int) -> str:
+    """Reserve the amount on the saved card without taking it. Returns the PaymentIntent id.
+
+    The money only moves when capture() runs, after the booking is confirmed. release() gives it back.
+    """
     if amount_cents <= 0 or amount_cents > config.MAX_CHARGE_CENTS:
         raise PaymentError(f"amount is outside the allowed range (max ${config.MAX_CHARGE_CENTS / 100:.0f})")
     stripe = _stripe()
@@ -85,22 +112,41 @@ def charge(conn: sqlite3.Connection, handle: str, amount_cents: int, description
     try:
         intent = stripe.PaymentIntent.create(
             amount=amount_cents, currency=config.CURRENCY, customer=customer_id(conn, handle), payment_method=card,
-            off_session=True, confirm=True, description=description, metadata={"dibs_proposal": str(proposal_id)},
+            off_session=True, confirm=True, capture_method="manual", description=description,
+            metadata={"dibs_proposal": str(proposal_id)},
             automatic_payment_methods={"enabled": True, "allow_redirects": "never"},
-            idempotency_key=f"dibs-{handle}-proposal-{proposal_id}",
+            idempotency_key=f"dibs-{handle}-hold-{proposal_id}",
         )
     except stripe.CardError as exc:
         raise PaymentError(f"the card was declined ({exc.code})") from exc
     except stripe.StripeError as exc:
-        raise PaymentError(f"Stripe could not take the payment ({type(exc).__name__})") from exc
-    if intent.status != "succeeded":
+        raise PaymentError(f"Stripe could not reserve the payment ({type(exc).__name__})") from exc
+    if intent.status not in ("requires_capture", "succeeded"):
         raise PaymentError(f"the payment needs more steps ({intent.status})")
     return intent.id
 
 
-def refund(payment_intent: str) -> None:
+def capture(payment_intent: str) -> None:
+    """Take the held money: the booking is confirmed."""
     stripe = _stripe()
     try:
-        stripe.Refund.create(payment_intent=payment_intent)
+        if stripe.PaymentIntent.retrieve(payment_intent).status == "requires_capture":
+            stripe.PaymentIntent.capture(payment_intent)
     except stripe.StripeError as exc:
-        raise PaymentError(f"refund failed ({type(exc).__name__}): refund it in the Stripe Dashboard") from exc
+        raise PaymentError(f"could not take the held payment ({type(exc).__name__}); check the Stripe Dashboard") from exc
+
+
+def release(payment_intent: str) -> str:
+    """Give the money back: cancel a hold, or refund if it was already taken. Returns 'released' or 'refunded'."""
+    stripe = _stripe()
+    try:
+        status = stripe.PaymentIntent.retrieve(payment_intent).status
+        if status == "requires_capture":
+            stripe.PaymentIntent.cancel(payment_intent)
+            return "released"
+        if status == "succeeded":
+            stripe.Refund.create(payment_intent=payment_intent)
+            return "refunded"
+        return "released"  # already cancelled: nothing was taken
+    except stripe.StripeError as exc:
+        raise PaymentError(f"could not return the payment ({type(exc).__name__}); do it in the Stripe Dashboard") from exc

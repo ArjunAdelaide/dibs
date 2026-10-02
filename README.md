@@ -125,26 +125,30 @@ Memory is plain text files, one folder per user, in `data/memory/` (not publishe
 
 Off by default. With `PAYMENTS_ENABLED=1` and a Stripe **test** key in `STRIPE_SECRET_KEY`:
 
-1. The proposal shows the exact total ("total $72.00 charged to your saved card").
-2. On the first YES, a person with no saved card gets a link to a Stripe-hosted page and saves a card there (card or Apple Pay). Dibs never sees card numbers.
-3. On the next YES, Dibs charges the saved card for that total, one time per proposal.
-4. You get a "PAID booking" alert and complete the booking on the venue site. `ops booked` texts the confirmation. `ops failed` refunds the full amount and tells the user.
+1. The booking summary is written by code and shows the exact total and the card ("Reply YES to book and pay $40.00 with Visa ending 4242").
+2. A person with no saved card gets a link to a Stripe-hosted page and saves a card there (card, Apple Pay or Link). Dibs never sees card numbers.
+3. On YES, Dibs puts a **hold** on the card for that total. No money is taken yet.
+4. When the booking is confirmed, the hold is captured and the user is told. If the booking fails, is cancelled by the user, or is not completed within 2 hours, the hold is released.
 
-Limits in code: a live key is refused unless `PAYMENTS_LIVE=1`, and no charge can exceed `MAX_CHARGE_CENTS` (default $300). Taking real money from other people makes you a merchant: get a registered business and advice on refunds and tax before you turn on live mode.
+Limits in code: a YES only counts for the exact summary the system sent; a live key is refused unless `PAYMENTS_LIVE=1`; no hold can exceed `MAX_CHARGE_CENTS` (default $300). Taking real money from other people makes you a merchant: get a registered business and advice on refunds and tax before you turn on live mode.
 
-## Concierge loop (you are the booking engine)
+Users can also text "cancel my booking", "what have I booked?" and "remove my card".
 
-1. A user says YES to a proposal. You get an iMessage alert with the venue, time, party size and booking link.
-2. You book it on the venue site or by phone.
-3. Close it, and the user gets a confirmation text:
+## Completing bookings (you are the booking engine)
 
-```bash
-.venv/bin/python -m dibs.ops list
-.venv/bin/python -m dibs.ops booked 3 "Ref STK-2291, lane 7, pay at the counter"
-.venv/bin/python -m dibs.ops failed 3 "4pm is full, 5:30pm is open"
+Until Dibs can pay venues by itself, a person completes each booking on the venue site.
+
+1. A user says YES. You get an iMessage alert on `OPERATOR_HANDLE` with the venue, time, party size, amount held and booking link.
+2. You make the booking on the venue site or by phone.
+3. You reply to Dibs from your own phone, and the user is told at once:
+
+```
+booked 3 Ref STK-2291, lane 7        (captures the held amount)
+failed 3 4pm is full                 (releases the hold)
+jobs                                 (lists what is waiting)
 ```
 
-Every manual booking teaches you exactly what to automate next.
+The same works in a terminal: `.venv/bin/python -m dibs.ops list | booked 3 "ref" | failed 3 "reason"`.
 
 ## Data
 
