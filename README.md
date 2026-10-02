@@ -103,7 +103,7 @@ iMessage does not share a user's location by itself. The user gives it in one of
 
 Concerts, festivals and sport come from two sources:
 
-- **Ticketmaster** (optional): put a free key from developer.ticketmaster.com in `TICKETMASTER_API_KEY`.
+- **Ticketmaster** (optional): put a free key from developer.ticketmaster.com in `TICKETMASTER_API_KEY`. It covers the venues that sell through Ticketmaster; events sold only through other sellers (for example Ticketek) are not in it.
 - **`data/events.json`**: a calendar you keep by hand for events Ticketmaster does not list. Each entry has a `source_url` and a `checked_at` date. Add `onsale_at` when a sale date is announced.
 
 Two event alerts exist. `onsale` texts the user at 8am on a sale date, or 15 minutes before a sale with a known time. `new_show` texts when a new show for an artist or team appears (needs the Ticketmaster key). The bot sends a link only. It never buys tickets and never joins a queue.

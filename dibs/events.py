@@ -27,6 +27,7 @@ from . import config, db
 TM_BASE = "https://app.ticketmaster.com/discovery/v2"
 ONSALE_LEAD = timedelta(minutes=15)   # warn this long before a sale with a known time
 DATE_ONLY_HOUR = 8                    # a sale with a date but no time: warn at 8am that day
+KINDS = {"music": "Music", "sport": "Sports", "arts": "Arts & Theatre", "comedy": "Comedy", "family": "Family"}
 
 
 def _local(iso_utc: str | None) -> str | None:
@@ -54,13 +55,15 @@ def normalise_tm(e: dict) -> dict:
 
 
 def search_ticketmaster(keyword: str | None = None, start: date | None = None, end: date | None = None,
-                        size: int = 10, client: httpx.Client | None = None) -> list[dict]:
+                        size: int = 40, client: httpx.Client | None = None, kind: str | None = None) -> list[dict]:
     if not config.TICKETMASTER_API_KEY:
         return []
     params = {"apikey": config.TICKETMASTER_API_KEY, "countryCode": config.COUNTRY_CODE, "city": config.CITY,
               "size": size, "sort": "date,asc"}
     if keyword:
         params["keyword"] = keyword
+    if kind in KINDS:
+        params["classificationName"] = KINDS[kind]
     if start:
         params["startDateTime"] = f"{start.isoformat()}T00:00:00Z"
     if end:
@@ -78,27 +81,53 @@ def load_calendar() -> list[dict]:
         out.append({"event_id": f"cal:{e['id']}", "name": e["name"], "start_date": e.get("start_date"), "end_date": e.get("end_date"),
                     "venue": e.get("venue"), "status": e.get("status"), "onsale_at": e.get("onsale_at"),
                     "presales": e.get("presales", []), "price_from": e.get("price_from"), "url": e.get("url"),
-                    "source": "calendar", "tags": e.get("tags", [])})
+                    "source": "calendar", "tags": e.get("tags", []), "kind": e.get("kind")})
     return out
 
 
-def search(keyword: str | None = None, start: date | None = None, end: date | None = None) -> list[dict]:
-    """Calendar events first (hand-checked), then Ticketmaster, soonest first."""
+def _one_per_show(found: list[dict]) -> list[dict]:
+    """A show with many sessions is one result: keep the first date and count the rest."""
+    shows: dict[tuple, dict] = {}
+    for e in found:
+        key = ((e.get("name") or "").strip().lower(), e.get("venue"))
+        if key in shows:
+            shows[key]["more_dates"] = shows[key].get("more_dates", 0) + 1
+        else:
+            shows[key] = e
+    # Big events list every ticket type as its own "event": more than 3 at one venue on one day is one event.
+    by_day: dict[tuple, list[dict]] = {}
+    for e in shows.values():
+        by_day.setdefault((e.get("venue"), e.get("start_date")), []).append(e)
+    out = []
+    for group in by_day.values():
+        if len(group) > 3:
+            first = dict(group[0])
+            first["ticket_options"] = len(group)
+            out.append(first)
+        else:
+            out.extend(group)
+    return sorted(out, key=lambda e: e.get("start_date") or "9999")
+
+
+def search(keyword: str | None = None, start: date | None = None, end: date | None = None, kind: str | None = None) -> list[dict]:
+    """Calendar events (hand-checked) and Ticketmaster, soonest first. kind: music, sport, arts, comedy, family."""
     words = [w.rstrip("s") or w for w in (keyword or "").lower().split()]  # "festivals" finds "festival"
     found = []
     for e in load_calendar():
         haystack = " ".join([e["name"], *e.get("tags", [])]).lower()
         if words and not all(w in haystack for w in words):
             continue
+        if kind and e.get("kind") != kind:
+            continue
         last = date.fromisoformat(e.get("end_date") or e["start_date"])
         if last < (start or date.today()) or (end and date.fromisoformat(e["start_date"]) > end):
             continue
         found.append(e)
     try:
-        found += search_ticketmaster(keyword, start, end)
+        found += search_ticketmaster(keyword, start, end, kind=kind)
     except httpx.HTTPError as exc:
         print(f"events: Ticketmaster search failed: {type(exc).__name__}")
-    return sorted(found, key=lambda e: e.get("start_date") or "9999")
+    return _one_per_show(sorted(found, key=lambda e: e.get("start_date") or "9999"))
 
 
 def get_event(event_id: str) -> dict | None:

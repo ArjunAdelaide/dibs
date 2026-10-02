@@ -28,6 +28,8 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr("dibs.config.SMTP_PASSWORD", "")
     monkeypatch.setattr("dibs.config.TICKETMASTER_API_KEY", "")
     monkeypatch.setattr("dibs.config.PAYMENTS_ENABLED", False)
+    monkeypatch.setattr("dibs.config.OPEN_ACCESS", False)
+    monkeypatch.setattr("dibs.config.BLOCKLIST", set())
     monkeypatch.setattr("dibs.config.STRIPE_SECRET_KEY", "")
 
 
@@ -528,3 +530,19 @@ def test_live_key_is_refused_and_amount_is_capped(monkeypatch, ctx):
     monkeypatch.setattr("dibs.config.STRIPE_SECRET_KEY", "sk_test_x")
     with pytest.raises(payments.PaymentError):
         payments.charge(ctx.conn, ctx.handle, 10_000_000, "too much", 1)
+
+
+def test_event_search_kinds_and_sessions(ctx, calendar, monkeypatch):
+    monkeypatch.setattr("dibs.config.TICKETMASTER_API_KEY", "k")
+    asked = {}
+
+    def fake_tm(keyword=None, start=None, end=None, size=40, client=None, kind=None):
+        asked.update(keyword=keyword, kind=kind)
+        show = events.normalise_tm(TM_EVENT)
+        return [show, {**show, "event_id": "tm:second-night", "start_date": "2027-02-11"}]
+
+    monkeypatch.setattr("dibs.events.search_ticketmaster", fake_tm)
+    out = find_events(ctx, kind="music")
+    assert asked == {"keyword": None, "kind": "music"}
+    assert len(out["events"]) == 1 and out["events"][0]["more_dates"] == 1  # two nights, one line
+    assert "error" in find_events(ctx, kind="concerts")

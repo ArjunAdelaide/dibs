@@ -302,15 +302,24 @@ def create_alert(ctx: ToolContext, venue_id: str, time_from: str, time_to: str, 
             "next": f"Tell the user you will text them when it opens. It is checked every {config.ALERT_INTERVAL_MINUTES} minutes."}
 
 
-def find_events(ctx: ToolContext, keyword: str | None = None, from_day: str | None = None, to_day: str | None = None) -> dict:
+def find_events(ctx: ToolContext, keyword: str | None = None, from_day: str | None = None, to_day: str | None = None,
+                kind: str | None = None) -> dict:
     try:
         start = date.fromisoformat(from_day) if from_day else ctx.now.date()
         end = date.fromisoformat(to_day) if to_day else None
     except ValueError:
         return {"error": "days must be YYYY-MM-DD"}
-    found = events.search(keyword, start, end)[:8]
-    out = {"events": [{k: e.get(k) for k in ("event_id", "name", "start_date", "venue", "status", "onsale_at", "presales", "price_from", "url")}
-                      for e in found]}
+    if kind and kind not in events.KINDS:
+        return {"error": f"kind must be one of {sorted(events.KINDS)}"}
+    found = events.search(keyword, start, end, kind=kind)
+    keep = ("event_id", "name", "start_date", "venue", "status", "onsale_at", "presales", "price_from", "url", "more_dates", "ticket_options")
+
+    def slim(rows: list[dict]) -> list[dict]:
+        return [{k: e[k] for k in keep if e.get(k) not in (None, [], "")} for e in rows]
+
+    out = {"events": slim(found[:10]), "total_found": len(found)}
+    if not found and end:  # nothing in the window: show what comes next instead of a dead end
+        out["next_after_those_dates"] = slim(events.search(keyword, end, None, kind=kind)[:3])
     if not config.TICKETMASTER_API_KEY:
         out["note"] = "Only the hand-kept calendar was searched (no Ticketmaster key). Say you may not see every concert yet."
     return out
@@ -485,7 +494,8 @@ SCHEMAS = [
          "party_size": {"type": "integer"}, "max_price": {"type": "number", "description": "Per person, optional"}},
         ["venue_id", "time_from", "time_to", "party_size"]),
     _fn("find_events", "Concerts, festivals and sport in the city: dates, on-sale and presale times, ticket link.",
-        {"keyword": {"type": "string", "description": "Artist, team, festival or kind of event"},
+        {"keyword": {"type": "string", "description": "A NAME only: an artist, team or festival. Leave empty for a general search."},
+         "kind": {"type": "string", "enum": sorted(events.KINDS), "description": "Type of event. Use music for concerts and gigs."},
          "from_day": {"type": "string", "description": "YYYY-MM-DD"}, "to_day": {"type": "string", "description": "YYYY-MM-DD"}}, []),
     _fn("create_event_alert", "Ticket alerts. kind=onsale: text the user just before tickets for one event go on sale (needs event_id). "
         "kind=new_show: text the user when a new show for an artist or team is announced (needs keyword).",
