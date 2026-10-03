@@ -44,10 +44,14 @@ cp .env.example .env        # then add your free Gemini key
 - Set `ALLOWLIST` to your testers' numbers and `OPERATOR_HANDLE` to your own number. Leave `DRY_RUN=1` until replies look right, then set it to `0`.
 
 ```bash
-.venv/bin/python -m dibs.channels.imessage
+./start        # keeps the Mac awake and starts the bridge again if it stops (Control + C twice to quit)
 ```
 
+Or run it once with `.venv/bin/python -m dibs.channels.imessage`. Everything the bridge prints is also kept in `data/bridge.log`.
+
 In group chats it only answers messages that contain `dibs`.
+
+**New people.** The first reply to a new person is followed once by a short note: Dibs is an AI agent, it keeps the conversation, STOP ends it, and a link to the [privacy notice](docs/privacy.html) (`WELCOME_NOTE` in `.env` changes or removes it).
 
 **Who can text it.** `ALLOWLIST` holds the numbers that get replies. Set `ALLOWLIST=*` to let anyone text the agent. Then these limits apply: 30 messages per hour and 120 per day for each person (`MAX_MSGS_PER_HOUR`, `MAX_MSGS_PER_DAY`), a `BLOCKLIST`, and STOP / START: a person who texts STOP gets no more messages and their alerts are cancelled. The agent only ever replies; it never texts a person first, except for an alert that person asked for.
 
@@ -97,7 +101,13 @@ iMessage does not share a user's location by itself. The user gives it in one of
 
 Outside the home city (`dibs/places.py`), the first request from a new area looks up venues within 15 km on OpenStreetMap (a few seconds), keeps them for 30 days, and checks up to 30 venue websites in the background for a booking platform. Payments stay off for venues outside the home country.
 
-## Alerts
+## Alerts, weekly bookings and auto-book
+
+- **Alert to one YES.** When an alert finds a slot, Dibs texts the booking summary, ready to approve with one YES.
+- **Weekly bookings.** "Golf every Saturday morning for 2, under $30": each week, up to 4 days ahead, Dibs finds a slot in the window and texts it for a YES.
+- **Auto-book.** "Book my alerts without asking, up to $40": Dibs shows the exact rule and turns it on only after a YES. From then on, an alert or weekly booking whose total is inside the limit is booked and the payment held at once; Dibs says so every time, and "cancel my booking" undoes it. "Stop auto-book" turns it off. Chat requests still always get a summary and a YES.
+- **Price changes.** If a venue changes the price after the user saw the summary, the booking does not go through: the user gets the new price to approve.
+
 
 "Text me if a Wednesday slot between 3pm and 5pm drops to $15." The bot saves an alert, checks the live feed every 30 minutes (`ALERT_INTERVAL_MINUTES`), and texts once when a real slot matches. The check uses no AI model.
 

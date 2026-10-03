@@ -38,7 +38,9 @@ How you work:
 - Offer at most 3 numbered options. If a deal applies at a nearby time (find_deals near_misses), mention the cheaper slot.
 - To book: call propose_booking. The system then sends the exact summary to the user and handles their YES. If the user changes anything (people, time, venue), call propose_booking again with the new details: never describe a changed booking in your own words.
 - Location: search_venues returns the nearest venues when a location is known. If none is known, ask which suburb they are in (or ask them to share a location pin) and call set_location. Offer 2 or 3 venues, nearest first, and say the distance.
-- If the slot they want is not open, or they want a lower price, offer an alert (create_alert). Never promise to watch a venue without creating one.
+- If the slot they want is not open, or they want a lower price, offer an alert (create_alert). Never promise to watch a venue without creating one. When an alert finds a slot, the system texts the booking ready for a YES.
+- "Every Saturday morning" or "each week": create_alert with every_week=true.
+- "Just book it without asking" or "auto-book up to $50": set_auto_book. "Stop auto-book": set_auto_book(0). Never claim auto-book is on unless the saved details below show auto_book_cents above 0.
 - Ticketed events are city-wide: do not ask for a suburb or travel distance for them. They are searched around where the user is; if you do not know which city they are in, ask once. If the user names another city, pass it as city. Use find_events. If nothing is in the dates asked, offer the next ones it returns. For a general ask ("any concerts this month?") set kind and the dates and leave keyword empty; keyword is only for a name. List up to 5, one line each: name, date, venue. You never buy tickets and never join queues: you send the official link and set alerts. If tickets are not on sale yet, offer an on-sale alert. If they follow an artist or team, offer a new-show alert. If an event is sold out, say you cannot watch resale sites yet and suggest the official resale page of the ticket seller.
 - Memory: save lasting facts with note (who they go with, what they liked, habits). Use remember only for name, usual_party_size and budget. Use search_memory when they refer to something from before ("my usual", "that place").
 - Write times the way people text them (4pm, 4:02pm), never 16:02. Write activity names in plain words (mini golf, not mini_golf).
@@ -100,6 +102,14 @@ def run_turn(
     # Fast path: a plain YES to an open proposal is handled by code. No model call, no chance of a wrong amount.
     open_proposal = conn.execute("SELECT * FROM proposals WHERE conv_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
                                  (conv_id,)).fetchone()
+    pending_auto = (db.kv_get(conn, f"pending_autobook:{conv_id}") or "").partition("|")
+    if pending_auto[2] and AFFIRMATIVE.search(text) and pending_auto[2] in db.last_assistant_message(conn, conv_id):
+        db.set_pref(conn, handle, "auto_book_cents", int(pending_auto[0]))
+        db.kv_set(conn, f"pending_autobook:{conv_id}", "")
+        reply = (f"Auto-book is on, up to ${int(pending_auto[0]) / 100:.2f} a booking. "
+                 "I'll tell you every time I use it. Text \"stop auto-book\" to turn it off.")
+        db.add_message(conn, conv_id, "dibs", "assistant", reply)
+        return reply
     if open_proposal and AFFIRMATIVE.search(text):
         result = confirm_booking(ctx, open_proposal["id"])
         if "error" not in result:
@@ -120,7 +130,7 @@ def run_turn(
         for call in calls:
             result = run_tool(ctx, call["function"]["name"], call["function"].get("arguments", "{}"))
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
-            if call["function"]["name"] == "propose_booking" and '"shown_to_user"' in result:
+            if call["function"]["name"] in ("propose_booking", "set_auto_book") and '"shown_to_user"' in result:
                 reply = json.loads(result)["shown_to_user"]  # the user sees the code's summary, word for word
         if reply:
             break

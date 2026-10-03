@@ -1,0 +1,9 @@
+#!/bin/zsh
+# Keep Dibs running: the Mac stays awake, and the bridge starts again if it stops.
+# Press Control + C twice to quit.
+cd "${0:A:h}"
+while true; do
+  caffeinate -is .venv/bin/python -m dibs.channels.imessage
+  echo "The bridge stopped. Starting again in 3 seconds. Press Control + C now to quit."
+  sleep 3 || break
+done

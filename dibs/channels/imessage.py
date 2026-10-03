@@ -175,7 +175,7 @@ def background(conn: sqlite3.Connection, catalog: Catalog, llm) -> None:
         return
     _last_alert_pass = time.monotonic()
     try:
-        sent = alerts.check_due(conn, catalog, send_to_chat) + events.check_due(conn, send_to_chat)
+        sent = alerts.check_due(conn, catalog, send_to_chat, notify_operator=notify_operator) + events.check_due(conn, send_to_chat)
         if sent:
             log(f"(sent {sent} alert message(s))")
         refunded = ops.refund_stale_paid(conn, catalog, send_to_chat)
@@ -256,6 +256,8 @@ def handle_message(src: sqlite3.Connection, conn: sqlite3.Connection, catalog: C
             send_to_chat(row["chat_guid"], canned)
         return
     guid = row["chat_guid"]
+    first_contact = config.WELCOME_NOTE and not is_group and db.kv_get(conn, f"welcomed:{row['handle']}") is None \
+        and db.user_messages_since(conn, row["handle"], "") == 0
     holding = None
     if config.HOLDING_AFTER_SECONDS > 0:  # a slow turn gets a quick "one sec" so the user is not left waiting
         holding = threading.Timer(config.HOLDING_AFTER_SECONDS, send_to_chat, args=(guid, "One sec, checking that for you."))
@@ -269,6 +271,10 @@ def handle_message(src: sqlite3.Connection, conn: sqlite3.Connection, catalog: C
             holding.cancel()
     log(f"-> ({time.monotonic() - started:.0f}s) {reply}")
     send_to_chat(guid, reply)
+    if first_contact:  # a new person: say once what Dibs is, what it keeps, and how to stop it
+        db.kv_set(conn, f"welcomed:{row['handle']}", "1")
+        send_to_chat(guid, config.WELCOME_NOTE)
+        log("-> (welcome note sent)")
 
 
 def check() -> None:

@@ -92,6 +92,11 @@ COUNTRY_CODE = os.getenv("DIBS_COUNTRY", "AU")
 EVENT_CHECK_HOURS = int(os.getenv("EVENT_CHECK_HOURS", "6"))
 
 ALERT_INTERVAL_MINUTES = int(os.getenv("ALERT_INTERVAL_MINUTES", "30"))
+# Sent once to each new person, after the first reply. Empty turns it off.
+WELCOME_NOTE = os.getenv("WELCOME_NOTE", "PS: I'm Dibs, an AI agent. I find things to do, book them, and text you alerts you ask for. "
+                         "I keep our messages so I can help you. Text STOP any time. "
+                         "Privacy: https://arjunadelaide.github.io/dibs/privacy.html")
+
 # Text "one sec" when a reply takes longer than this many seconds. 0 turns it off.
 HOLDING_AFTER_SECONDS = float(os.getenv("HOLDING_AFTER_SECONDS", "8"))
 # Phase A: open a browser window on this Mac with the booking prepared, for the operator to pay.

@@ -322,7 +322,7 @@ def search_memory(ctx: ToolContext, query: str) -> dict:
 
 
 def create_alert(ctx: ToolContext, venue_id: str, time_from: str, time_to: str, party_size: int,
-                 day: str | None = None, weekday: str | None = None, max_price: float | None = None) -> dict:
+                 day: str | None = None, weekday: str | None = None, max_price: float | None = None, every_week: bool = False) -> dict:
     venue = ctx.catalog.venues.get(venue_id)
     if not venue:
         return {"error": f"unknown venue_id {venue_id}"}
@@ -331,9 +331,16 @@ def create_alert(ctx: ToolContext, venue_id: str, time_from: str, time_to: str, 
     weekday = weekday.lower()[:3] if weekday else None
     if bool(day) == bool(weekday) or (weekday and weekday not in alerts.DAYS):
         return {"error": "give either day (YYYY-MM-DD) or weekday (mon..sun)"}
+    if every_week and not weekday:
+        return {"error": "a weekly booking needs a weekday (mon..sun)"}
     days = alerts.dates_for(day, weekday, ctx.now.date())
     if not days:
         return {"error": "that day is in the past"}
+    if every_week:  # a standing weekly booking: each week Dibs finds the slot and asks (or books, with auto-book on)
+        alert_id = alerts.create(ctx.conn, ctx.conv_id, ctx.handle, venue_id, None, weekday, time_from, time_to, party_size, max_price, repeat=True)
+        return {"created": True, "alert_id": f"slot-{alert_id}",
+                "next": "Tell the user: each week, a few days before, you will find a slot in that window and text it for their YES "
+                        "(or book it straight away if their auto-book limit covers it)."}
     try:
         open_now = alerts.find_matches(venue, days, time_from, time_to, party_size, max_price, ctx.now)
     except Exception:
@@ -342,7 +349,25 @@ def create_alert(ctx: ToolContext, venue_id: str, time_from: str, time_to: str, 
         return {"created": False, "open_now": open_now[:3], "next": "It is open already: offer these slots instead of an alert."}
     alert_id = alerts.create(ctx.conn, ctx.conv_id, ctx.handle, venue_id, day, weekday, time_from, time_to, party_size, max_price)
     return {"created": True, "alert_id": f"slot-{alert_id}",
-            "next": f"Tell the user you will text them when it opens. It is checked every {config.ALERT_INTERVAL_MINUTES} minutes."}
+            "next": f"Tell the user you will text them when it opens, with the booking ready for a YES. It is checked every {config.ALERT_INTERVAL_MINUTES} minutes."}
+
+
+def set_auto_book(ctx: ToolContext, limit_dollars: float) -> dict:
+    """Standing permission: Dibs may book the user's own alerts and weekly bookings without asking, up to a total."""
+    if limit_dollars <= 0:
+        db.set_pref(ctx.conn, ctx.handle, "auto_book_cents", 0)
+        db.kv_set(ctx.conn, f"pending_autobook:{ctx.conv_id}", "")
+        return {"auto_book": "off", "tell_user": "Auto-book is off. I'll always ask before I book."}
+    if not payments.enabled():
+        return {"error": "auto-book needs payments, which are not turned on"}
+    cents = round(limit_dollars * 100)
+    if cents > config.MAX_CHARGE_CENTS:
+        return {"error": f"the limit cannot be more than ${config.MAX_CHARGE_CENTS / 100:.0f}"}
+    shown = (f"Auto-book: when one of your alerts or weekly bookings finds a slot that costs ${cents / 100:.2f} or less in total, "
+             "I book it and hold the payment without asking first. I tell you at once, and you can cancel.\n\n"
+             "Reply YES to turn this on.")
+    db.kv_set(ctx.conn, f"pending_autobook:{ctx.conv_id}", f"{cents}|{shown}")
+    return {"shown_to_user": shown, "next": "The system sends this exact text. It only turns on when the user replies YES."}
 
 
 def _event_place(ctx: ToolContext, city: str | None) -> tuple[dict | None, str | None]:
@@ -457,23 +482,10 @@ def propose_booking(ctx: ToolContext, venue_id: str, starts_at: str, party_size:
         if not slot:
             return {"error": "that time, rate or group size is not open on the live feed; call check_availability and offer real slots"}
         deal_note = None
-    # One open proposal per conversation keeps "yes" unambiguous.
-    ctx.conn.execute("UPDATE proposals SET status = 'superseded' WHERE conv_id = ? AND status = 'pending'", (ctx.conv_id,))
-    found = found if has_connector(venue) else None
-    card = None
-    if found and payments.enabled_for(venue):  # name the card that will be used, so there are no surprises
-        try:
-            method = payments.saved_method(ctx.conn, ctx.handle)
-            card = method[1] if method else None
-        except payments.PaymentError:
-            card = None
-    shown = executors.proposal_text(venue, when, party_size, found, deal_note, card)
-    cur = ctx.conn.execute(
-        "INSERT INTO proposals (conv_id, handle, venue_id, starts_at, party_size, deal_id, rate, shown, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (ctx.conv_id, ctx.handle, venue_id, when.isoformat(), party_size, deal_id, found.name if found else rate, shown, notes, ctx.now.isoformat()),
-    )
-    ctx.conn.commit()
-    return {"proposal_id": cur.lastrowid, "shown_to_user": shown,
+    proposal_id, shown = executors.create_proposal(
+        ctx.conn, venue, ctx.conv_id, ctx.handle, when, party_size, rate=found if has_connector(venue) else None,
+        deal_id=deal_id, deal_note=deal_note, rate_name=rate, notes=notes, now=ctx.now)
+    return {"proposal_id": proposal_id, "shown_to_user": shown,
             "next": "The system sends this exact text to the user. Any change (people, time, venue) needs a new propose_booking call."}
 
 
@@ -486,7 +498,7 @@ def confirm_booking(ctx: ToolContext, proposal_id: int) -> dict:
     if not row:
         return {"error": "no pending proposal with that id in this conversation"}
     created = datetime.fromisoformat(row["created_at"])
-    if ctx.now - created > timedelta(minutes=config.PROPOSAL_TTL_MINUTES):
+    if ctx.now - created > timedelta(minutes=row["ttl_minutes"]):
         ctx.conn.execute("UPDATE proposals SET status = 'expired' WHERE id = ?", (proposal_id,))
         ctx.conn.commit()
         return {"error": "proposal expired; propose it again"}
@@ -544,6 +556,7 @@ HANDLERS = {
     "note": note,
     "search_memory": search_memory,
     "create_alert": create_alert,
+    "set_auto_book": set_auto_book,
     "find_events": find_events,
     "create_event_alert": create_event_alert,
     "list_alerts": list_alerts,
@@ -598,8 +611,11 @@ SCHEMAS = [
         {"venue_id": {"type": "string"}, "day": {"type": "string", "description": "YYYY-MM-DD, for one date"},
          "weekday": {"type": "string", "description": "mon..sun, for the next such day"},
          "time_from": {"type": "string", "description": "HH:MM, 24h"}, "time_to": {"type": "string", "description": "HH:MM, 24h"},
-         "party_size": {"type": "integer"}, "max_price": {"type": "number", "description": "Per person, optional"}},
+         "party_size": {"type": "integer"}, "max_price": {"type": "number", "description": "Per person, optional"},
+         "every_week": {"type": "boolean", "description": "True for a standing weekly booking (needs weekday)"}},
         ["venue_id", "time_from", "time_to", "party_size"]),
+    _fn("set_auto_book", "The user wants Dibs to book their alerts and weekly bookings without asking, up to a total amount. 0 turns it off.",
+        {"limit_dollars": {"type": "number"}}, ["limit_dollars"]),
     _fn("find_events", "Concerts, festivals and sport in the city: dates, on-sale and presale times, ticket link.",
         {"keyword": {"type": "string", "description": "A NAME only: an artist, team or festival. Leave empty for a general search."},
          "kind": {"type": "string", "enum": sorted(events.KINDS), "description": "Type of event. Use music for concerts and gigs."},

@@ -13,6 +13,7 @@ The check uses no AI model, so alerts cost nothing to run.
 
 import sqlite3
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -45,11 +46,11 @@ def find_matches(venue: dict, days: list[date], time_from: str, time_to: str, pa
 
 
 def create(conn: sqlite3.Connection, conv_id: str, handle: str, venue_id: str, day: str | None, weekday: str | None,
-           time_from: str, time_to: str, party_size: int, max_price: float | None) -> int:
+           time_from: str, time_to: str, party_size: int, max_price: float | None, repeat: bool = False) -> int:
     cur = conn.execute(
-        "INSERT INTO alerts (conv_id, handle, venue_id, day, weekday, time_from, time_to, party_size, max_price, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (conv_id, handle, venue_id, day, weekday, time_from, time_to, party_size, max_price, db.now_iso()),
+        "INSERT INTO alerts (conv_id, handle, venue_id, day, weekday, time_from, time_to, party_size, max_price, repeat, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (conv_id, handle, venue_id, day, weekday, time_from, time_to, party_size, max_price, int(repeat), db.now_iso()),
     )
     conn.commit()
     return cur.lastrowid
@@ -57,13 +58,37 @@ def create(conn: sqlite3.Connection, conv_id: str, handle: str, venue_id: str, d
 
 def describe(row: sqlite3.Row, catalog: Catalog) -> str:
     venue = catalog.venues.get(row["venue_id"], {"name": row["venue_id"]})
-    when = row["day"] or f"next {row['weekday']}"
+    when = row["day"] or (f"every {row['weekday']}" if row["repeat"] else f"next {row['weekday']}")
     price = f", up to ${row['max_price']:.0f} per person" if row["max_price"] is not None else ""
     return f"#{row['id']} {venue['name']}, {when}, {row['time_from']} to {row['time_to']}, {row['party_size']} people{price}"
 
 
+WEEKLY_LEAD_DAYS = 4  # a weekly booking is looked for this many days ahead
+
+
+def _fire(conn: sqlite3.Connection, venue: dict, row: sqlite3.Row, match: dict, now: datetime,
+          notify_operator: Callable[[str], None]) -> str:
+    """A slot matched: get it ready for one YES, or book it at once when the user's auto-book limit covers it."""
+    from . import executors, payments
+
+    when = datetime.fromisoformat(f"{match['day']}T{match['time']}").replace(tzinfo=ZoneInfo(venue.get("tz") or config.TIMEZONE))
+    slot, rate = executors.find_slot(venue, when, match["rate"], row["party_size"])
+    proposal_id, shown = executors.create_proposal(conn, venue, row["conv_id"], row["handle"], when, row["party_size"], rate=rate,
+                                                   now=now, ttl_minutes=180)
+    proposal = conn.execute("SELECT * FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
+    what = "weekly booking" if row["repeat"] else "alert"
+    limit = db.get_prefs(conn, row["handle"]).get("auto_book_cents") or 0
+    if limit and proposal["total_cents"] and proposal["total_cents"] <= limit and payments.enabled_for(venue):
+        ctx = SimpleNamespace(conn=conn, handle=row["handle"], conv_id=row["conv_id"], now=now, notify_operator=notify_operator)
+        result = executors.execute(ctx, proposal, venue)
+        if result.get("route") == "paid":
+            return (f"Your {what} found a slot, and it is inside your auto-book limit, so I went ahead.\n\n"
+                    f"{executors.result_text(result, venue, proposal)}\n\nText \"cancel my booking\" if you don't want it.")
+    return f"Your {what} found a slot.\n\n{shown}"
+
+
 def check_due(conn: sqlite3.Connection, catalog: Catalog, send: Callable[[str, str], None], now: datetime | None = None,
-              force: bool = False) -> int:
+              force: bool = False, notify_operator: Callable[[str], None] = print) -> int:
     """Check every active alert that is due. Returns the number of messages sent."""
     now = now or datetime.now(ZoneInfo(config.TIMEZONE))
     sent = 0
@@ -72,26 +97,28 @@ def check_due(conn: sqlite3.Connection, catalog: Catalog, send: Callable[[str, s
             if now - datetime.fromisoformat(row["last_checked"]) < timedelta(minutes=config.ALERT_INTERVAL_MINUTES):
                 continue
         venue = catalog.venues.get(row["venue_id"])
-        days = dates_for(row["day"], row["weekday"], now.date())
-        if not venue or not has_connector(venue) or not days:
+        local_now = now.astimezone(ZoneInfo((venue or {}).get("tz") or config.TIMEZONE))
+        days = dates_for(row["day"], row["weekday"], local_now.date())
+        if row["repeat"]:  # weekly: only the coming occurrence, a few days ahead, once per week
+            days = [d for d in days[:1] if (d - local_now.date()).days <= WEEKLY_LEAD_DAYS and d.isoformat() != row["last_fired_for"]]
+        if not venue or not has_connector(venue) or (not days and not row["repeat"]):
             conn.execute("UPDATE alerts SET status = 'expired' WHERE id = ?", (row["id"],))
             conn.commit()
             continue
         try:
-            local_now = now.astimezone(ZoneInfo(venue.get("tz") or config.TIMEZONE))
             matches = find_matches(venue, days, row["time_from"], row["time_to"], row["party_size"], row["max_price"], local_now)
         except Exception as exc:  # venue site down: try again at the next wake-up
             print(f"alerts: check failed for #{row['id']}: {type(exc).__name__}")
             matches = []
         conn.execute("UPDATE alerts SET last_checked = ? WHERE id = ?", (now.isoformat(), row["id"]))
         if matches:
-            m = matches[0]
-            when = datetime.fromisoformat(f"{m['day']}T{m['time']}")
-            text = (f"Your alert came through: {venue['name']} has {when:%-I:%M%p} open on {when:%a %-d %b} "
-                    f"at ${m['price_per_person']:.2f} per person. Reply \"book it\" and I'll set it up.")
+            text = _fire(conn, venue, row, matches[0], now, notify_operator)
             send(row["conv_id"], text)
             db.add_message(conn, row["conv_id"], "dibs", "assistant", text)
-            conn.execute("UPDATE alerts SET status = 'done' WHERE id = ?", (row["id"],))
+            if row["repeat"]:
+                conn.execute("UPDATE alerts SET last_fired_for = ? WHERE id = ?", (matches[0]["day"], row["id"]))
+            else:
+                conn.execute("UPDATE alerts SET status = 'done' WHERE id = ?", (row["id"],))
             sent += 1
         conn.commit()
     return sent

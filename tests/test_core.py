@@ -269,7 +269,7 @@ def test_alert_fires_once_when_slot_opens(live, monkeypatch):
     monkeypatch.setattr("dibs.alerts.slots_for", lambda venue, day: slots)
     assert alerts.check_due(live.conn, live.catalog, lambda conv, text: sent.append(text), now=NOW) == 0  # not due yet
     assert alerts.check_due(live.conn, live.catalog, lambda conv, text: sent.append(text), now=NOW, force=True) == 1
-    assert "9:00AM" in sent[0] and "Wed 7 Oct" in sent[0]
+    assert "Your alert found a slot." in sent[0] and "Wed 7 Oct, 9:00am" in sent[0] and "Reply YES to book." in sent[0]
     assert alerts.check_due(live.conn, live.catalog, lambda conv, text: sent.append(text), now=NOW, force=True) == 0  # one message only
 
 
@@ -829,3 +829,86 @@ def test_events_follow_the_user_and_payments_stay_home(ctx, calendar, monkeypatc
     monkeypatch.setattr("dibs.config.PAYMENTS_ENABLED", True)
     monkeypatch.setattr("dibs.config.STRIPE_SECRET_KEY", "sk_test_x")
     assert payments.enabled_for({"name": "Home venue"}) and not payments.enabled_for({"name": "US venue", "country_code": "us"})
+
+
+# --- stage 1: alert -> one YES, weekly bookings, auto-book, price changes ---
+
+from dibs.tools import set_auto_book  # noqa: E402
+
+
+def _slots(monkeypatch, slots):
+    for module in ("dibs.alerts", "dibs.tools"):
+        monkeypatch.setattr(f"{module}.slots_for", lambda venue, day: slots)
+    monkeypatch.setattr("dibs.executors.slots_for", lambda venue, day, fresh=False: slots)
+
+
+def test_alert_message_can_be_booked_with_one_yes(live, monkeypatch):
+    _slots(monkeypatch, [])
+    assert create_alert(live, "mini", "09:00", "09:30", 2, day="2026-10-07")["created"]
+    _slots(monkeypatch, quick18.parse(FIXTURE.read_text(), "https://x.quick18.com"))
+    sent = []
+    alerts.check_due(live.conn, live.catalog, lambda conv, text: sent.append(text), now=NOW, force=True)
+    llm = ScriptedLLM([])  # no model call is allowed: the YES is handled by code
+    reply = run_turn(live.conn, live.catalog, llm, "c1", live.handle, "yes", live.alerts.append, now=NOW)
+    assert "That slot is open: Mini Golf, Wed 7 Oct, 9:00am, 2 people" in reply
+
+
+def test_weekly_booking_fires_once_a_week(live, monkeypatch):
+    _slots(monkeypatch, quick18.parse(FIXTURE.read_text(), "https://x.quick18.com"))
+    out = create_alert(live, "mini", "09:00", "09:30", 2, weekday="wed", every_week=True)  # NOW is Monday 5 Oct
+    assert out["created"] and "error" in create_alert(live, "mini", "09:00", "09:30", 2, day="2026-10-07", every_week=True)
+    sent = []
+    send = lambda conv, text: sent.append(text)  # noqa: E731
+    assert alerts.check_due(live.conn, live.catalog, send, now=NOW, force=True) == 1 and "Your weekly booking found a slot." in sent[0]
+    assert alerts.check_due(live.conn, live.catalog, send, now=NOW, force=True) == 0  # same week: quiet
+    assert "every wed" in list_alerts(live)["alerts"][0]
+    next_week = NOW + timedelta(days=7)
+    assert alerts.check_due(live.conn, live.catalog, send, now=next_week, force=True) == 1 and "Wed 14 Oct" in sent[1]
+
+
+def test_auto_book_needs_a_yes_and_respects_the_limit(paying, monkeypatch):
+    paying.state["card"] = "pm_test"
+    llm = ScriptedLLM([("set_auto_book", {"limit_dollars": 40})])
+    turn = lambda text: run_turn(paying.conn, paying.catalog, llm, "c1", paying.handle, text, paying.alerts.append, now=NOW)  # noqa: E731
+    asked = turn("just book my alerts without asking, up to 40 bucks")
+    assert "Reply YES to turn this on." in asked and "$40.00 or less" in asked
+    assert not db.get_prefs(paying.conn, paying.handle).get("auto_book_cents")  # the model alone cannot turn it on
+    assert "Auto-book is on, up to $40.00" in turn("yes") and db.get_prefs(paying.conn, paying.handle)["auto_book_cents"] == 4000
+
+    _slots(monkeypatch, quick18.parse(FIXTURE.read_text(), "https://x.quick18.com"))
+    sent = []
+    send = lambda conv, text: sent.append(text)  # noqa: E731
+    alerts.create(paying.conn, "c1", paying.handle, "mini", "2026-10-07", None, "09:00", "09:30", 2, None)  # 2 x $9 = $18: inside the limit
+    alerts.check_due(paying.conn, paying.catalog, send, now=NOW, force=True, notify_operator=paying.alerts.append)
+    assert "inside your auto-book limit, so I went ahead" in sent[0] and "hold of $18.00" in sent[0] and paying.state["holds"] == [1800]
+    alerts.create(paying.conn, "c1", paying.handle, "mini", "2026-10-07", None, "09:00", "09:30", 6, None)  # 6 x $9 = $54: over the limit
+    alerts.check_due(paying.conn, paying.catalog, send, now=NOW, force=True, notify_operator=paying.alerts.append)
+    assert "Reply YES to book and pay $54.00" in sent[1] and paying.state["holds"] == [1800]  # asked, not booked
+
+    assert set_auto_book(paying, 0)["auto_book"] == "off" and db.get_prefs(paying.conn, paying.handle)["auto_book_cents"] == 0
+    assert "error" in set_auto_book(paying, 5000)  # above the hard cap
+
+
+def test_price_change_after_the_summary_needs_a_new_yes(paying, monkeypatch):
+    paying.state["card"] = "pm_test"
+    pid = propose_booking(paying, "mini", "2026-10-07T09:10", 2, rate="SHANX Single")["proposal_id"]  # shown at $18 each
+    dearer = quick18.parse(FIXTURE.read_text().replace("$18.00", "$25.00"), "https://x.quick18.com")
+    monkeypatch.setattr("dibs.executors.slots_for", lambda venue, day, fresh=False: dearer)
+    paying.last_user_text = "yes"
+    out = confirm_booking(paying, pid)
+    assert "price changed" in out["error"] and paying.state["holds"] == []
+
+
+def test_new_person_gets_the_welcome_note_once(ctx, monkeypatch):
+    sent = []
+    monkeypatch.setattr("dibs.channels.imessage.send_to_chat", lambda guid, text: sent.append(text))
+    monkeypatch.setattr("dibs.channels.imessage.shared_location", lambda src, rowid: None)
+    monkeypatch.setattr("dibs.config.ALLOWLIST", {"+61400000009"})
+    monkeypatch.setattr("dibs.config.HOLDING_AFTER_SECONDS", 0)
+    monkeypatch.setattr("dibs.channels.imessage.run_turn",
+                        lambda conn, catalog, llm, conv, handle, text, notify, **k: (db.add_message(conn, conv, handle, "user", text), "Hey!")[1])
+    row = {"rowid": 1, "text": "hi", "attributedBody": None, "handle": "+61400000009", "chat_guid": "g9", "style": 45}
+    imessage.handle_message(ctx.conn, ctx.conn, ctx.catalog, None, row)
+    imessage.handle_message(ctx.conn, ctx.conn, ctx.catalog, None, {**row, "rowid": 2, "text": "bowling?"})
+    assert sent[0] == "Hey!" and "I'm Dibs, an AI agent" in sent[1] and "STOP" in sent[1] and "privacy" in sent[1].lower()
+    assert sent[2:] == ["Hey!"]  # the note goes out once

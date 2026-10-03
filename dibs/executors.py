@@ -87,6 +87,30 @@ def proposal_text(venue: dict, when: datetime, party_size: int, rate=None, deal_
     return "\n".join(lines) + "\n\n" + ask
 
 
+def create_proposal(conn, venue: dict, conv_id: str, handle: str, when: datetime, party_size: int, rate=None,
+                    deal_id: str | None = None, deal_note: str | None = None, rate_name: str | None = None, notes: str = "",
+                    now: datetime | None = None, ttl_minutes: int = config.PROPOSAL_TTL_MINUTES) -> tuple[int, str]:
+    """Store a booking for the user to approve. Returns (proposal_id, the exact text they must be shown)."""
+    card = None
+    if rate and payments.enabled_for(venue):  # name the card that will be used, so there are no surprises
+        try:
+            method = payments.saved_method(conn, handle)
+            card = method[1] if method else None
+        except payments.PaymentError:
+            card = None
+    shown = proposal_text(venue, when, party_size, rate, deal_note, card)
+    # One open proposal per conversation keeps "yes" unambiguous.
+    conn.execute("UPDATE proposals SET status = 'superseded' WHERE conv_id = ? AND status = 'pending'", (conv_id,))
+    cur = conn.execute(
+        "INSERT INTO proposals (conv_id, handle, venue_id, starts_at, party_size, deal_id, rate, shown, total_cents, ttl_minutes, notes, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (conv_id, handle, venue["id"], when.isoformat(), party_size, deal_id, rate.name if rate else rate_name, shown,
+         total_cents(rate, party_size) if rate else None, ttl_minutes, notes, (now or datetime.now(when.tzinfo)).isoformat()),
+    )
+    conn.commit()
+    return cur.lastrowid, shown
+
+
 def result_text(result: dict, venue: dict, proposal) -> str:
     """The reply after a YES, by route. Written by code: no model call, and no wrong amounts."""
     when = _when(datetime.fromisoformat(proposal["starts_at"]))
@@ -159,6 +183,9 @@ def execute(ctx, proposal, venue: dict) -> dict:
         slot, rate = find_slot(venue, when, proposal["rate"], proposal["party_size"], fresh=True)  # never book on old data
         if not slot:
             return {"error": "that slot was just taken; call check_availability again and offer the nearest times"}
+        if proposal["total_cents"] is not None and total_cents(rate, proposal["party_size"]) != proposal["total_cents"]:
+            # The venue changed the price after the user saw it: they must see and approve the new one.
+            return {"error": "the price changed since the user saw it; call propose_booking again so they see the new price"}
         if payments.enabled_for(venue):
             return pay_and_hand_over(ctx, proposal, venue, rate, record)
         return {

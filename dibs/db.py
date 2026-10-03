@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS proposals (
     deal_id TEXT,
     rate TEXT,
     shown TEXT,
+    total_cents INTEGER,
+    ttl_minutes INTEGER NOT NULL DEFAULT 30,
     notes TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL
@@ -57,6 +59,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     time_to TEXT NOT NULL,
     party_size INTEGER NOT NULL,
     max_price REAL,
+    repeat INTEGER NOT NULL DEFAULT 0,
+    last_fired_for TEXT,
     status TEXT NOT NULL DEFAULT 'active',
     last_checked TEXT,
     created_at TEXT NOT NULL
@@ -108,6 +112,10 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
         conn.execute("ALTER TABLE proposals ADD COLUMN rate TEXT")
     if "shown" not in [c[1] for c in conn.execute("PRAGMA table_info(proposals)")]:  # databases from before exact summaries
         conn.execute("ALTER TABLE proposals ADD COLUMN shown TEXT")
+    for table, column, kind in (("proposals", "total_cents", "INTEGER"), ("proposals", "ttl_minutes", "INTEGER NOT NULL DEFAULT 30"),
+                                ("alerts", "repeat", "INTEGER NOT NULL DEFAULT 0"), ("alerts", "last_fired_for", "TEXT")):
+        if column not in [c[1] for c in conn.execute(f"PRAGMA table_info({table})")]:  # databases from before stage 1
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
     if "place" not in [c[1] for c in conn.execute("PRAGMA table_info(event_alerts)")]:  # databases from before worldwide events
         conn.execute("ALTER TABLE event_alerts ADD COLUMN place TEXT")
     if "payment_intent" not in [c[1] for c in conn.execute("PRAGMA table_info(bookings)")]:  # databases from before payments
