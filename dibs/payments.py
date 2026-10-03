@@ -110,12 +110,13 @@ def hold(conn: sqlite3.Connection, handle: str, amount_cents: int, description: 
     if not card:
         raise PaymentError("no saved card")
     try:
+        customer = customer_id(conn, handle)
         intent = stripe.PaymentIntent.create(
-            amount=amount_cents, currency=config.CURRENCY, customer=customer_id(conn, handle), payment_method=card,
+            amount=amount_cents, currency=config.CURRENCY, customer=customer, payment_method=card,
             off_session=True, confirm=True, capture_method="manual", description=description,
             metadata={"dibs_proposal": str(proposal_id)},
             automatic_payment_methods={"enabled": True, "allow_redirects": "never"},
-            idempotency_key=f"dibs-{handle}-hold-{proposal_id}",
+            idempotency_key=f"dibs-{customer}-hold-{proposal_id}",  # one hold per customer and proposal, even if the database is rebuilt
         )
     except stripe.CardError as exc:
         raise PaymentError(f"the card was declined ({exc.code})") from exc
