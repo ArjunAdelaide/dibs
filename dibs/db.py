@@ -73,9 +73,19 @@ CREATE TABLE IF NOT EXISTS event_alerts (
     fire_at TEXT,
     label TEXT NOT NULL DEFAULT '',
     seen_ids TEXT NOT NULL DEFAULT '[]',
+    place TEXT,
     status TEXT NOT NULL DEFAULT 'active',
     last_checked TEXT,
     created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS discovered (
+    id TEXT PRIMARY KEY,
+    tile TEXT NOT NULL,
+    data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS areas (
+    tile TEXT PRIMARY KEY,
+    fetched_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
@@ -98,6 +108,8 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
         conn.execute("ALTER TABLE proposals ADD COLUMN rate TEXT")
     if "shown" not in [c[1] for c in conn.execute("PRAGMA table_info(proposals)")]:  # databases from before exact summaries
         conn.execute("ALTER TABLE proposals ADD COLUMN shown TEXT")
+    if "place" not in [c[1] for c in conn.execute("PRAGMA table_info(event_alerts)")]:  # databases from before worldwide events
+        conn.execute("ALTER TABLE event_alerts ADD COLUMN place TEXT")
     if "payment_intent" not in [c[1] for c in conn.execute("PRAGMA table_info(bookings)")]:  # databases from before payments
         conn.execute("ALTER TABLE bookings ADD COLUMN amount_cents INTEGER")
         conn.execute("ALTER TABLE bookings ADD COLUMN payment_intent TEXT")

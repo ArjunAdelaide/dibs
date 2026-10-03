@@ -78,7 +78,8 @@ def check_due(conn: sqlite3.Connection, catalog: Catalog, send: Callable[[str, s
             conn.commit()
             continue
         try:
-            matches = find_matches(venue, days, row["time_from"], row["time_to"], row["party_size"], row["max_price"], now)
+            local_now = now.astimezone(ZoneInfo(venue.get("tz") or config.TIMEZONE))
+            matches = find_matches(venue, days, row["time_from"], row["time_to"], row["party_size"], row["max_price"], local_now)
         except Exception as exc:  # venue site down: try again at the next wake-up
             print(f"alerts: check failed for #{row['id']}: {type(exc).__name__}")
             matches = []

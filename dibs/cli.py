@@ -6,7 +6,7 @@
 
 import argparse
 
-from . import db
+from . import db, places
 from .agent import run_turn
 from .catalog import Catalog
 from . import llm as models
@@ -21,6 +21,7 @@ def main() -> None:
 
     conn = db.connect()
     catalog = Catalog.load()
+    places.load_into(catalog, conn)  # venues found earlier in other cities
     llm = models.for_job("chat")
     conv_id = args.chat or f"cli;-;{args.handle}"
     print(f"Texting Dibs as {args.handle} ({len(catalog.venues)} venues, {len(catalog.deals)} deals). Ctrl-D to quit.")

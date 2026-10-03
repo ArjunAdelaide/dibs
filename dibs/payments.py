@@ -27,6 +27,11 @@ def enabled() -> bool:
     return config.PAYMENTS_ENABLED and bool(config.STRIPE_SECRET_KEY)
 
 
+def enabled_for(venue: dict) -> bool:
+    """Payments run only for venues in the home country: one currency, and a person can complete the booking."""
+    return enabled() and (venue.get("country_code") or config.COUNTRY_CODE).lower() == config.COUNTRY_CODE.lower()
+
+
 def _stripe():
     import stripe
 

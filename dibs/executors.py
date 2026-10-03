@@ -19,7 +19,7 @@ def pick_route(venue: dict) -> str:
         return "link"
     if venue.get("booking_email") and config.SMTP_USER and config.SMTP_PASSWORD:
         return "email"
-    if venue.get("booking_url"):
+    if venue.get("booking_url") or venue.get("website"):
         return "page"
     return "concierge"
 
@@ -79,7 +79,7 @@ def proposal_text(venue: dict, when: datetime, party_size: int, rate=None, deal_
     if rate:
         total = total_cents(rate, party_size) / 100
         lines.append(f"${total:.2f}" if party_size == 1 else f"${rate.price:.2f} each, ${total:.2f} total")
-        ask = f"Reply YES to book and pay ${total:.2f}{pay_with}." if payments.enabled() else "Reply YES to book."
+        ask = f"Reply YES to book and pay ${total:.2f}{pay_with}." if payments.enabled_for(venue) else "Reply YES to book."
     else:
         if deal_note:
             lines.append(deal_note)
@@ -159,7 +159,7 @@ def execute(ctx, proposal, venue: dict) -> dict:
         slot, rate = find_slot(venue, when, proposal["rate"], proposal["party_size"], fresh=True)  # never book on old data
         if not slot:
             return {"error": "that slot was just taken; call check_availability again and offer the nearest times"}
-        if payments.enabled():
+        if payments.enabled_for(venue):
             return pay_and_hand_over(ctx, proposal, venue, rate, record)
         return {
             "booking_id": record("link_sent"), "route": "link", "booking_link": rate.url,
@@ -182,7 +182,7 @@ def execute(ctx, proposal, venue: dict) -> dict:
                 "tell_user": "Say the booking request went to the venue by email and you will text when the venue confirms."}
 
     if route == "page":
-        return {"booking_id": record("link_sent"), "route": "page", "booking_link": venue["booking_url"],
+        return {"booking_id": record("link_sent"), "route": "page", "booking_link": venue.get("booking_url") or venue["website"],
                 "status": "NOT booked yet: the user must finish on the venue page",
                 "tell_user": "You cannot see live times for this venue. Send this booking page link and say they pick the "
                              "time and finish there. Do not say it is booked."}

@@ -12,10 +12,11 @@ from .llm import LLM, LLMUnavailable
 from . import executors
 from .tools import AFFIRMATIVE, SCHEMAS, ToolContext, confirm_booking, run_tool
 
-SYSTEM = """You are Dibs, a texting concierge for experiences in {city}: bowling, golf, driving ranges, mini golf, laser tag, VR, escape rooms, arcades, and ticketed events (concerts, festivals, sport).
+SYSTEM = """You are Dibs, a texting concierge for experiences: bowling, golf, driving ranges, mini golf, laser tag, VR, escape rooms, arcades, climbing, karting, and ticketed events (concerts, festivals, sport).
+You work anywhere in the world. Your home city is {city}: there you have a hand-checked venue list, live slots and payments. Elsewhere you find venues and events near the user and send the venue's booking page; live slots exist only where a venue's booking system is one you can read. Never tell a user you only cover {city}.
 You find the best slot, the best off-peak deal, and get it booked. For ticketed events you find the event, give the ticket link, and set alerts. Nothing else: politely decline unrelated requests.
 
-Now: {now} ({tz}).
+Now, where this user is: {now} ({tz}).
 This user: {handle}. Booking details on file: {prefs}.
 What you remember about them:
 {memory}
@@ -38,7 +39,7 @@ How you work:
 - To book: call propose_booking. The system then sends the exact summary to the user and handles their YES. If the user changes anything (people, time, venue), call propose_booking again with the new details: never describe a changed booking in your own words.
 - Location: search_venues returns the nearest venues when a location is known. If none is known, ask which suburb they are in (or ask them to share a location pin) and call set_location. Offer 2 or 3 venues, nearest first, and say the distance.
 - If the slot they want is not open, or they want a lower price, offer an alert (create_alert). Never promise to watch a venue without creating one.
-- Ticketed events are city-wide: do not ask for a suburb or travel distance for them. Use find_events. If nothing is in the dates asked, offer the next ones it returns. For a general ask ("any concerts this month?") set kind and the dates and leave keyword empty; keyword is only for a name. List up to 5, one line each: name, date, venue. You never buy tickets and never join queues: you send the official link and set alerts. If tickets are not on sale yet, offer an on-sale alert. If they follow an artist or team, offer a new-show alert. If an event is sold out, say you cannot watch resale sites yet and suggest the official resale page of the ticket seller.
+- Ticketed events are city-wide: do not ask for a suburb or travel distance for them. They are searched around where the user is; if you do not know which city they are in, ask once. If the user names another city, pass it as city. Use find_events. If nothing is in the dates asked, offer the next ones it returns. For a general ask ("any concerts this month?") set kind and the dates and leave keyword empty; keyword is only for a name. List up to 5, one line each: name, date, venue. You never buy tickets and never join queues: you send the official link and set alerts. If tickets are not on sale yet, offer an on-sale alert. If they follow an artist or team, offer a new-show alert. If an event is sold out, say you cannot watch resale sites yet and suggest the official resale page of the ticket seller.
 - Memory: save lasting facts with note (who they go with, what they liked, habits). Use remember only for name, usual_party_size and budget. Use search_memory when they refer to something from before ("my usual", "that place").
 - Write times the way people text them (4pm, 4:02pm), never 16:02. Write activity names in plain words (mini golf, not mini_golf).
 - Write like a friend texting: short lines, no markdown, no headings, no emoji spam. Under 600 characters.
@@ -69,18 +70,21 @@ def run_turn(
     now: datetime | None = None,
     send_later: Callable[[str], None] | None = None,
 ) -> str:
-    now = now or datetime.now(ZoneInfo(config.TIMEZONE))
     prefs = db.get_prefs(conn, handle)
+    user_tz = (prefs.get("location") or {}).get("tz") or config.TIMEZONE
+    now = now or datetime.now(ZoneInfo(user_tz))
     past = db.history(conn, conv_id, config.HISTORY_TURNS)
     if "maps" in text.lower() or text.startswith("Shared location:"):  # a location pin or maps link
         coords = geo.extract_coords(text)
         if coords:
-            db.set_pref(conn, handle, "location", {"name": "shared location", "lat": coords[0], "lon": coords[1]})
+            user_tz = geo.timezone_at(*coords) or config.TIMEZONE
+            db.set_pref(conn, handle, "location", {"name": "shared location", "lat": coords[0], "lon": coords[1], "tz": user_tz})
             prefs = db.get_prefs(conn, handle)
+            now = now.astimezone(ZoneInfo(user_tz))
     db.add_message(conn, conv_id, handle, "user", text)
 
     system = SYSTEM.format(
-        city=config.CITY, now=now.strftime("%A %d %B %Y %I:%M%p"), tz=config.TIMEZONE, handle=handle,
+        city=config.CITY, now=now.strftime("%A %d %B %Y %I:%M%p"), tz=user_tz, handle=handle,
         prefs=json.dumps(prefs) if prefs else "none yet", pending=_pending(conn, catalog, conv_id), memory=memory.context(handle),
         group_note=GROUP_NOTE if is_group else "",
     )

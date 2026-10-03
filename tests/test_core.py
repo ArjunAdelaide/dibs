@@ -42,6 +42,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr("dibs.config.OPEN_ACCESS", False)
     monkeypatch.setattr("dibs.config.SUPERVISED_CHECKOUT", False)
     monkeypatch.setattr("dibs.config.BOOKING_EMAIL", "")
+    monkeypatch.setattr("dibs.geo.timezone_at", lambda lat, lon, client=None: None)  # no network in tests
     monkeypatch.setattr("dibs.config.BLOCKLIST", set())
     monkeypatch.setattr("dibs.config.STRIPE_SECRET_KEY", "")
 
@@ -588,7 +589,7 @@ def test_event_search_kinds_and_sessions(ctx, calendar, monkeypatch):
     monkeypatch.setattr("dibs.config.TICKETMASTER_API_KEY", "k")
     asked = {}
 
-    def fake_tm(keyword=None, start=None, end=None, size=40, client=None, kind=None):
+    def fake_tm(keyword=None, start=None, end=None, size=40, client=None, kind=None, where=None):
         asked.update(keyword=keyword, kind=kind)
         show = events.normalise_tm(TM_EVENT)
         return [show, {**show, "event_id": "tm:second-night", "start_date": "2027-02-11"}]
@@ -748,3 +749,83 @@ def test_one_bad_message_does_not_stop_the_bridge(ctx, monkeypatch, tmp_path):
     with pytest.raises(RuntimeError):
         imessage.handle_message(src, ctx.conn, ctx.catalog, None, row)  # the handler raises...
     assert (tmp_path / "bridge.log").read_text().count("<- +61400000001: hi") == 1  # ...and what came in is on file
+
+
+# --- anywhere in the world ---
+
+from dibs import places  # noqa: E402
+
+DC = {"name": "Washington", "lat": 38.895, "lon": -77.036, "city": "Washington", "country_code": "us", "tz": "America/New_York"}
+OSM_DC = [
+    {"type": "node", "id": 11, "lat": 38.90, "lon": -77.03, "tags": {"name": "Capital Bowl", "leisure": "bowling_alley", "website": "https://capitalbowl.test"}},
+    {"type": "way", "id": 12, "center": {"lat": 38.91, "lon": -77.05}, "tags": {"name": "Potomac Mini Golf", "leisure": "miniature_golf"}},
+    {"type": "node", "id": 13, "lat": 38.9, "lon": -77.0, "tags": {"leisure": "bowling_alley"}},  # no name: skipped
+]
+
+
+def test_venues_are_found_live_outside_the_home_city(ctx):
+    fetched = []
+
+    def fetch(lat, lon):
+        fetched.append((lat, lon))
+        return OSM_DC
+
+    assert places.ensure_area(ctx.conn, ctx.catalog, {"lat": -34.92, "lon": 138.63}, fetch=fetch) == {"new": 0, "home": True}
+    assert places.ensure_area(ctx.conn, ctx.catalog, DC, fetch=fetch, background=False) == {"new": 2}
+    assert places.ensure_area(ctx.conn, ctx.catalog, DC, fetch=fetch, background=False) == {"new": 0} and len(fetched) == 1  # kept
+    venue = ctx.catalog.venues["capital-bowl-11"]
+    assert venue["categories"] == ["bowling"] and venue["tz"] == "America/New_York" and venue["country_code"] == "us"
+    again = Catalog(venues={}, deals=[])
+    assert places.load_into(again, ctx.conn) == 2 and "potomac-mini-golf-12" in again.venues  # survives a restart
+    failing = lambda lat, lon: (_ for _ in ()).throw(ConnectionError("down"))  # noqa: E731
+    far = {"lat": 51.5, "lon": -0.1}
+    assert "error" in places.ensure_area(ctx.conn, ctx.catalog, far, fetch=failing)
+
+
+def test_a_user_abroad_sees_venues_near_them_not_home_ones(ctx, monkeypatch):
+    monkeypatch.setattr("dibs.places.fetch_osm", lambda lat, lon, client=None: OSM_DC)
+    monkeypatch.setattr("dibs.places.inspect_sites", lambda *a, **k: 0)
+    db.set_pref(ctx.conn, ctx.handle, "location", DC)
+    out = search_venues(ctx, category="bowling")
+    assert [v["name"] for v in out["venues"]] == ["Capital Bowl"]  # Test Bowl in Adelaide is 16,000 km away
+    ideas = suggest_ideas(ctx, "2026-10-07", "16:00", 2)["ideas"]
+    assert {i["name"] for i in ideas} == {"Capital Bowl", "Potomac Mini Golf"} and not any(i["live"] for i in ideas)
+    pid = propose_booking(ctx, "capital-bowl-11", "2026-10-07T16:00", 2)["proposal_id"]
+    prop = ctx.conn.execute("SELECT starts_at FROM proposals WHERE id = ?", (pid,)).fetchone()
+    assert prop["starts_at"].endswith("-04:00")  # 4pm in Washington, not 4pm in Adelaide
+    ctx.last_user_text = "yes"
+    out = confirm_booking(ctx, pid)
+    assert out["route"] == "page" and out["booking_link"] == "https://capitalbowl.test"
+
+
+def test_home_users_never_see_venues_from_other_cities(ctx, monkeypatch):
+    places.ensure_area(ctx.conn, ctx.catalog, DC, fetch=lambda lat, lon: OSM_DC, background=False)
+    assert all(v["name"] != "Capital Bowl" for v in search_venues(ctx, category="bowling")["venues"])  # location unknown
+    assert "Capital Bowl" not in [i["name"] for i in suggest_ideas(ctx, "2026-10-07", "16:00", 2, category="bowling")["ideas"]]
+
+
+def test_events_follow_the_user_and_payments_stay_home(ctx, calendar, monkeypatch):
+    monkeypatch.setattr("dibs.config.TICKETMASTER_API_KEY", "k")
+    asked = []
+
+    class Reply:
+        def raise_for_status(self): pass
+        def json(self): return {"_embedded": {"events": [TM_EVENT]}}
+
+    class Client:
+        def get(self, url, params): asked.append(params); return Reply()
+
+    assert events.search_ticketmaster(kind="music", client=Client(), where=None)
+    assert asked[0]["city"] == "Adelaide" and "latlong" not in asked[0]
+    from datetime import date as _date
+    found = events.search_ticketmaster(kind="music", client=Client(), where=DC, start=_date(2026, 10, 4), end=_date(2026, 10, 4))
+    assert asked[1]["latlong"] == "38.895,-77.036" and "city" not in asked[1]
+    # "4 October" means 4 October in Washington: an 8pm show there is already 5 October in UTC
+    assert (asked[1]["startDateTime"], asked[1]["endDateTime"]) == ("2026-10-04T04:00:00Z", "2026-10-05T03:59:59Z")
+    assert found[0]["onsale_at"].endswith("-04:00")  # sale times shown in the user's own time
+    monkeypatch.setattr("dibs.events.search_ticketmaster", lambda *a, **k: [])
+    assert [e["name"] for e in events.search("fest", where=None)] == ["Test Fest 2027"]
+    assert events.search("fest", where=DC) == []  # the Adelaide calendar is not shown to someone in Washington
+    monkeypatch.setattr("dibs.config.PAYMENTS_ENABLED", True)
+    monkeypatch.setattr("dibs.config.STRIPE_SECRET_KEY", "sk_test_x")
+    assert payments.enabled_for({"name": "Home venue"}) and not payments.enabled_for({"name": "US venue", "country_code": "us"})

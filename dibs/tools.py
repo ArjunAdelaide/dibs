@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from . import alerts, config, db, events, executors, geo, memory, payments
+from . import alerts, config, db, events, executors, geo, memory, payments, places
 from .catalog import Catalog, deal_applies
 from .connectors import has_connector, slots_for
 
@@ -54,34 +54,63 @@ def _venue_summary(ctx: ToolContext, venue: dict) -> dict:
     }
 
 
+NEAR_KM = 100  # a venue further than this from the user is not "near" them, whatever they asked for
+
+
 def _origin(ctx: ToolContext, near: str | None) -> dict | None:
     """Where to measure distance from: a place named in this request, else the user's saved location."""
+    saved = db.get_prefs(ctx.conn, ctx.handle).get("location")
     if near:
         try:
-            return geo.geocode(near)
+            return geo.geocode(near, near=saved)
         except Exception:
             return None
-    return db.get_prefs(ctx.conn, ctx.handle).get("location")
+    return saved
+
+
+def _cover(ctx: ToolContext, origin: dict | None) -> str | None:
+    """Outside the home city, make sure venues around the user are known. Returns a note for the model if it failed."""
+    if not origin or places.is_home(origin["lat"], origin["lon"]):
+        return None
+    if not origin.get("tz"):
+        origin["tz"] = geo.timezone_at(origin["lat"], origin["lon"])
+    result = places.ensure_area(ctx.conn, ctx.catalog, origin)
+    return result.get("error")
+
+
+def _km(origin: dict, venue: dict) -> float | None:
+    if venue.get("lat") is None:
+        return None
+    return geo.haversine_km(origin["lat"], origin["lon"], venue["lat"], venue["lon"])
 
 
 def search_venues(ctx: ToolContext, category: str | None = None, near: str | None = None, query: str | None = None) -> dict:
-    found = ctx.catalog.search(category=category, query=query, limit=None)
     origin = _origin(ctx, near)
+    problem = _cover(ctx, origin)
+    found = ctx.catalog.search(category=category, query=query, limit=None)
     rows = []
     for venue in found:
         row = _venue_summary(ctx, venue)
-        if origin and venue.get("lat") is not None:
-            row["distance_km"] = round(geo.haversine_km(origin["lat"], origin["lon"], venue["lat"], venue["lon"]), 1)
+        if origin:
+            km = _km(origin, venue)
+            if km is not None and km > NEAR_KM:
+                continue  # a venue in another city is not an answer
+            if km is not None:
+                row["distance_km"] = round(km, 1)
+        elif venue.get("source") == "osm-live":
+            continue  # location unknown: only the home city's list
         rows.append(row)
     if origin:  # nearest first; venues without coordinates last
         rows.sort(key=lambda r: r.get("distance_km", 9999))
     out = {"venues": rows[:6], "count": len(rows)}
+    if problem:
+        out["note"] = problem
     out["sorted_by"] = f"distance from {origin['name']}" if origin else "no location known: ask where the user is, then call set_location"
     return out
 
 
 def _site_report(venue: dict, when: str, res) -> str:
-    link = venue["booking_url"]
+    link = venue.get("booking_url") or venue.get("website")
     if res.status == "done":
         price = res.result.get("price")
         price = f" ({price})" if price and "not shown" not in str(price).lower() else ""
@@ -103,7 +132,8 @@ def check_site(ctx: ToolContext, venue_id: str, day: str, around_time: str = "16
         return {"error": f"unknown venue_id {venue_id}"}
     if has_connector(venue):
         return {"error": "this venue has live_availability: use check_availability, it is instant"}
-    if not venue.get("booking_url"):
+    site = venue.get("booking_url") or venue.get("website")
+    if not site:
         return {"error": "no booking site is on file for this venue"}
     try:
         the_day = date.fromisoformat(day)
@@ -118,7 +148,7 @@ def check_site(ctx: ToolContext, venue_id: str, day: str, around_time: str = "16
             try:
                 # the browser agent gets its own (stronger) model when one is set
                 browser_llm = ctx.llm.job("browser") if hasattr(ctx.llm, "job") else ctx.llm
-                res = browser.browse(venue["booking_url"], goal, browser_llm)
+                res = browser.browse(site, goal, browser_llm)
             except Exception as exc:
                 res = browser.BrowseResult(status="failed", result={"reason": type(exc).__name__})
         return _site_report(venue, f"{the_day:%a %-d %b}", res)
@@ -151,17 +181,19 @@ def suggest_ideas(ctx: ToolContext, day: str, around_time: str = "16:00", party_
     except ValueError:
         return {"error": "day must be YYYY-MM-DD and around_time HH:MM"}
 
+    problem = _cover(ctx, origin)
     nearby = []
-    for venue in ctx.catalog.venues.values():
+    for venue in list(ctx.catalog.venues.values()):
         if category and category.lower() not in [c.lower() for c in venue.get("categories", [])]:
             continue
-        if not origin:  # an activity was named but we do not know where they are: search the whole city
-            nearby.append((0.0, venue))
+        if not origin:  # an activity was named but we do not know where they are: search the home city
+            if venue.get("source") != "osm-live":
+                nearby.append((0.0, venue))
             continue
         if venue.get("lat") is None:
             continue
         km = geo.haversine_km(origin["lat"], origin["lon"], venue["lat"], venue["lon"])
-        if km <= max_km or (category and has_connector(venue)):  # a bookable venue of the asked kind is worth the trip
+        if km <= max_km or (category and has_connector(venue) and km <= NEAR_KM):  # a bookable venue of the asked kind is worth the trip
             nearby.append((km, venue))
     nearby.sort(key=lambda pair: (not has_connector(pair[1]), pair[0]))  # live venues first, then nearest
 
@@ -193,16 +225,17 @@ def suggest_ideas(ctx: ToolContext, day: str, around_time: str = "16:00", party_
     picked = (varied + rest)[:6]
     return {"ideas": picked, "within_km": max_km, "from": origin["name"] if origin else "anywhere in the city (location unknown)",
             "note": "live=true ideas have a real open slot. For live=false you cannot see times: say the venue confirms."
-                    if picked else "Nothing within that distance. Offer to look further."}
+                    if picked else (problem or "Nothing within that distance. Offer to look further.")}
 
 
 def set_location(ctx: ToolContext, place: str) -> dict:
     try:
-        spot = geo.geocode(place)
+        spot = geo.geocode(place, near=db.get_prefs(ctx.conn, ctx.handle).get("location"))
     except Exception as exc:
-        return {"error": f"location lookup failed ({type(exc).__name__}); ask for a suburb name"}
+        return {"error": f"location lookup failed ({type(exc).__name__}); ask for a suburb or city name"}
     if not spot:
-        return {"error": f"could not find '{place}'; ask for a suburb name"}
+        return {"error": f"could not find '{place}'; ask for a suburb or city name"}
+    spot["tz"] = geo.timezone_at(spot["lat"], spot["lon"]) or config.TIMEZONE
     db.set_pref(ctx.conn, ctx.handle, "location", spot)
     memory.note(ctx.handle, f"Location given: {spot['name']}", ctx.now)
     return {"saved": spot, "next": "search_venues now sorts by distance from here"}
@@ -224,10 +257,11 @@ def get_venue(ctx: ToolContext, venue_id: str) -> dict:
     return detail
 
 
-def _parse_local(ctx: ToolContext, starts_at: str) -> datetime:
+def _parse_local(ctx: ToolContext, starts_at: str, venue: dict | None = None) -> datetime:
+    """A time with no zone is the venue's local time."""
     dt = datetime.fromisoformat(starts_at)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=ZoneInfo(config.TIMEZONE))
+        dt = dt.replace(tzinfo=ZoneInfo((venue or {}).get("tz") or config.TIMEZONE))
     return dt
 
 
@@ -311,8 +345,23 @@ def create_alert(ctx: ToolContext, venue_id: str, time_from: str, time_to: str, 
             "next": f"Tell the user you will text them when it opens. It is checked every {config.ALERT_INTERVAL_MINUTES} minutes."}
 
 
+def _event_place(ctx: ToolContext, city: str | None) -> tuple[dict | None, str | None]:
+    """(place, error). A city named in the request, else where the user is. None means the home city."""
+    saved = db.get_prefs(ctx.conn, ctx.handle).get("location")
+    if not city:
+        return saved, None
+    try:
+        place = geo.geocode(city, near=saved)
+    except Exception:
+        place = None
+    if not place:
+        return None, f"could not find '{city}'"
+    place["tz"] = geo.timezone_at(place["lat"], place["lon"])
+    return place, None
+
+
 def find_events(ctx: ToolContext, keyword: str | None = None, from_day: str | None = None, to_day: str | None = None,
-                kind: str | None = None) -> dict:
+                kind: str | None = None, city: str | None = None) -> dict:
     try:
         start = date.fromisoformat(from_day) if from_day else ctx.now.date()
         end = date.fromisoformat(to_day) if to_day else None
@@ -320,21 +369,26 @@ def find_events(ctx: ToolContext, keyword: str | None = None, from_day: str | No
         return {"error": "days must be YYYY-MM-DD"}
     if kind and kind not in events.KINDS:
         return {"error": f"kind must be one of {sorted(events.KINDS)}"}
-    found = events.search(keyword, start, end, kind=kind)
+    where, problem = _event_place(ctx, city)
+    if problem:
+        return {"error": problem}
+    found = events.search(keyword, start, end, kind=kind, where=where)
     keep = ("event_id", "name", "start_date", "venue", "status", "onsale_at", "presales", "price_from", "url", "more_dates", "ticket_options")
 
     def slim(rows: list[dict]) -> list[dict]:
         return [{k: e[k] for k in keep if e.get(k) not in (None, [], "")} for e in rows]
 
-    out = {"events": slim(found[:10]), "total_found": len(found)}
+    out = {"events": slim(found[:10]), "total_found": len(found),
+           "searched": config.CITY if events.is_home(where) else f"within {events.RADIUS_KM} km of {where.get('name')}"}
     if not found and end:  # nothing in the window: show what comes next instead of a dead end
-        out["next_after_those_dates"] = slim(events.search(keyword, end, None, kind=kind)[:3])
+        out["next_after_those_dates"] = slim(events.search(keyword, end, None, kind=kind, where=where)[:3])
     if not config.TICKETMASTER_API_KEY:
         out["note"] = "Only the hand-kept calendar was searched (no Ticketmaster key). Say you may not see every concert yet."
     return out
 
 
-def create_event_alert(ctx: ToolContext, kind: str, event_id: str | None = None, keyword: str | None = None) -> dict:
+def create_event_alert(ctx: ToolContext, kind: str, event_id: str | None = None, keyword: str | None = None,
+                       city: str | None = None) -> dict:
     if kind == "onsale":
         event = events.get_event(event_id) if event_id else None
         if not event:
@@ -351,8 +405,12 @@ def create_event_alert(ctx: ToolContext, kind: str, event_id: str | None = None,
             return {"error": "give the artist, team or festival name as keyword"}
         if not config.TICKETMASTER_API_KEY:
             return {"error": "new-show alerts need the Ticketmaster key, which is not set up yet. Say this feature is not on yet."}
-        seen = [e["event_id"] for e in events.search(keyword, ctx.now.date())]
-        alert_id = events.create_alert(ctx.conn, ctx.conv_id, ctx.handle, "new_show", keyword=keyword, seen=seen)
+        where, problem = _event_place(ctx, city)
+        if problem:
+            return {"error": problem}
+        where = None if events.is_home(where) else where
+        seen = [e["event_id"] for e in events.search(keyword, ctx.now.date(), where=where)]
+        alert_id = events.create_alert(ctx.conn, ctx.conv_id, ctx.handle, "new_show", keyword=keyword, seen=seen, where=where)
         return {"created": True, "alert_id": f"event-{alert_id}", "already_listed": len(seen),
                 "next": "Tell the user you will text when a new show for that name appears."}
     return {"error": "kind must be onsale or new_show"}
@@ -380,7 +438,7 @@ def propose_booking(ctx: ToolContext, venue_id: str, starts_at: str, party_size:
     venue = ctx.catalog.venues.get(venue_id)
     if not venue:
         return {"error": f"unknown venue_id {venue_id}"}
-    when = _parse_local(ctx, starts_at)
+    when = _parse_local(ctx, starts_at, venue)
     if when <= ctx.now:
         return {"error": "that time is in the past"}
     if party_size < 1 or party_size > 40:
@@ -403,7 +461,7 @@ def propose_booking(ctx: ToolContext, venue_id: str, starts_at: str, party_size:
     ctx.conn.execute("UPDATE proposals SET status = 'superseded' WHERE conv_id = ? AND status = 'pending'", (ctx.conv_id,))
     found = found if has_connector(venue) else None
     card = None
-    if found and payments.enabled():  # name the card that will be used, so there are no surprises
+    if found and payments.enabled_for(venue):  # name the card that will be used, so there are no surprises
         try:
             method = payments.saved_method(ctx.conn, ctx.handle)
             card = method[1] if method else None
@@ -528,7 +586,7 @@ SCHEMAS = [
         {"day": {"type": "string", "description": "Local date, YYYY-MM-DD"}, "around_time": {"type": "string", "description": "HH:MM, 24h"},
          "party_size": {"type": "integer"}, "max_km": {"type": "number", "description": "How far they will travel"},
          "category": CATEGORY}, ["day"]),
-    _fn("set_location", "Save where the user is: a suburb, an address, or 'lat,lon'.",
+    _fn("set_location", "Save where the user is, anywhere in the world: a suburb, a city ('Washington DC'), an address, or 'lat,lon'.",
         {"place": {"type": "string"}}, ["place"]),
     _fn("remember", "Save one of the fixed facts the booking forms need.",
         {"key": {"type": "string", "enum": sorted(PREF_KEYS)}, "value": {"type": "string"}}, ["key", "value"]),
@@ -545,10 +603,12 @@ SCHEMAS = [
     _fn("find_events", "Concerts, festivals and sport in the city: dates, on-sale and presale times, ticket link.",
         {"keyword": {"type": "string", "description": "A NAME only: an artist, team or festival. Leave empty for a general search."},
          "kind": {"type": "string", "enum": sorted(events.KINDS), "description": "Type of event. Use music for concerts and gigs."},
+         "city": {"type": "string", "description": "Only when the user names another city. Empty = where the user is."},
          "from_day": {"type": "string", "description": "YYYY-MM-DD"}, "to_day": {"type": "string", "description": "YYYY-MM-DD"}}, []),
     _fn("create_event_alert", "Ticket alerts. kind=onsale: text the user just before tickets for one event go on sale (needs event_id). "
         "kind=new_show: text the user when a new show for an artist or team is announced (needs keyword).",
-        {"kind": {"type": "string", "enum": ["onsale", "new_show"]}, "event_id": {"type": "string"}, "keyword": {"type": "string"}}, ["kind"]),
+        {"kind": {"type": "string", "enum": ["onsale", "new_show"]}, "event_id": {"type": "string"}, "keyword": {"type": "string"},
+         "city": {"type": "string", "description": "For new_show, only when the user names another city"}}, ["kind"]),
     _fn("list_alerts", "The user's active alerts, of both kinds.", {}, []),
     _fn("cancel_alert", "Stop an alert.", {"alert_id": {"type": "string", "description": "As shown by list_alerts, e.g. slot-3 or event-2"}}, ["alert_id"]),
     _fn("propose_booking", "Create a booking proposal for the user to approve. Always do this before confirm_booking.",

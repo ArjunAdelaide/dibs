@@ -30,15 +30,47 @@ def extract_coords(text: str) -> tuple[float, float] | None:
     return (lat, lon) if -90 <= lat <= 90 and -180 <= lon <= 180 else None
 
 
-def geocode(place: str, client: httpx.Client | None = None) -> dict | None:
-    coords = extract_coords(place)
-    if coords:
-        return {"name": "shared location", "lat": coords[0], "lon": coords[1]}
-    client = client or httpx.Client(timeout=15, headers={"User-Agent": "dibs/0.1 (personal booking agent)"})
-    resp = client.get("https://nominatim.openstreetmap.org/search",
-                      params={"q": f"{place}, {config.REGION}", "format": "json", "limit": 1})
+def _client() -> httpx.Client:
+    return httpx.Client(timeout=15, headers={"User-Agent": "dibs/0.1 (personal booking agent)"})
+
+
+def _search(client: httpx.Client, query: str, near: dict | None) -> dict | None:
+    params = {"q": query, "format": "json", "limit": 1, "addressdetails": 1}
+    if near:  # prefer results close to where the user already is; it is a preference, not a fence
+        params["viewbox"] = f"{near['lon'] - 1},{near['lat'] + 1},{near['lon'] + 1},{near['lat'] - 1}"
+    resp = client.get("https://nominatim.openstreetmap.org/search", params=params)
     resp.raise_for_status()
     hits = resp.json()
     if not hits:
         return None
-    return {"name": hits[0]["display_name"].split(",")[0], "lat": float(hits[0]["lat"]), "lon": float(hits[0]["lon"])}
+    address = hits[0].get("address", {})
+    return {"name": hits[0]["display_name"].split(",")[0], "lat": float(hits[0]["lat"]), "lon": float(hits[0]["lon"]),
+            "city": address.get("city") or address.get("town") or address.get("village") or address.get("state"),
+            "country_code": address.get("country_code")}
+
+
+def geocode(place: str, client: httpx.Client | None = None, near: dict | None = None) -> dict | None:
+    """A place name anywhere in the world -> coordinates, city and country.
+
+    Short names ("Norwood") are tried in the home region first, then near the user, then worldwide.
+    """
+    coords = extract_coords(place)
+    if coords:
+        return {"name": "shared location", "lat": coords[0], "lon": coords[1]}
+    client = client or _client()
+    if "," not in place and not near:
+        hit = _search(client, f"{place}, {config.REGION}", None)
+        if hit:
+            return hit
+    return _search(client, place, near)
+
+
+def timezone_at(lat: float, lon: float, client: httpx.Client | None = None) -> str | None:
+    """The time zone name at a point (Open-Meteo, free, no key)."""
+    try:
+        resp = (client or _client()).get("https://api.open-meteo.com/v1/forecast",
+                                         params={"latitude": lat, "longitude": lon, "timezone": "auto", "current": "temperature_2m"})
+        resp.raise_for_status()
+        return resp.json().get("timezone")
+    except (httpx.HTTPError, ValueError):
+        return None

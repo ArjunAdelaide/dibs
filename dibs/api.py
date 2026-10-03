@@ -7,7 +7,7 @@ posts to /inbound instead of the local iMessage bridge.
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from . import db
+from . import db, places
 from .agent import run_turn
 from .catalog import Catalog
 from . import llm as models
@@ -15,6 +15,7 @@ from . import llm as models
 app = FastAPI(title="Dibs")
 conn = db.connect()
 catalog = Catalog.load()
+places.load_into(catalog, conn)
 _llm = None
 
 

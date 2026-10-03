@@ -11,7 +11,7 @@ Text it "I want to do something tomorrow at 4pm". It asks where you are and how 
 
 **Try it:** send an iMessage to `iamdibsagent@gmail.com`. It answers when the host Mac is on.
 
-Built for one city (Adelaide) and one category (experiences), in the spirit of the vertical agents from DoorDash and others. Change the city and the venue list to run it somewhere else.
+**Home city and everywhere else.** Dibs has a home city (Adelaide) with a hand-checked venue list, live slots, deals and payments. Anywhere else in the world it still works: it finds venues near the user on OpenStreetMap, events near them on Ticketmaster, uses the user's own time zone, and sends the venue's booking page. In the background it reads each new venue's website and turns on live slots where the booking system is one it can read. Set `DIBS_CITY`, `DIBS_HOME_LAT`, `DIBS_HOME_LON` and the venue list to make another city the home.
 
 ## Setup
 
@@ -93,7 +93,9 @@ Limits enforced in code: it stays on the venue's site, stops at a CAPTCHA or bot
 
 ## Location
 
-iMessage does not share a user's location by itself. The user gives it in one of three ways: a suburb ("I'm in Norwood"), a location pin from the Messages app, or a maps link. The bot saves it and lists the nearest venues first, with the distance. Place names are looked up with OpenStreetMap (free, no key).
+iMessage does not share a user's location by itself. The user gives it in one of three ways: a place name ("I'm in Norwood", "near Dupont Circle in Washington DC"), a location pin from the Messages app, or a maps link. The bot saves it with the time zone and lists the nearest venues first, with the distance. Place names are looked up with OpenStreetMap (free, no key); short names are tried in the home region first.
+
+Outside the home city (`dibs/places.py`), the first request from a new area looks up venues within 15 km on OpenStreetMap (a few seconds), keeps them for 30 days, and checks up to 30 venue websites in the background for a booking platform. Payments stay off for venues outside the home country.
 
 ## Alerts
 
@@ -181,7 +183,9 @@ dibs/connectors/     live availability readers (quick18, miclub)
 dibs/alerts.py       watch a venue, text when a slot opens
 dibs/events.py       concerts, festivals, sport: search and ticket alerts
 dibs/memory.py       text-file memory and the daily tidy-up
-dibs/geo.py          distance and place lookup
+dibs/geo.py          distance, place lookup, time zone
+dibs/places.py       venues near a user anywhere in the world
+dibs/fingerprint.py  which booking platform a venue's website uses
 dibs/browser.py      browser agent: reads open times from a venue's booking site
 dibs/supervised.py   phase A: prepared checkout window, reads the confirmation
 dibs/executors.py    booking routes: link, email, page, concierge, paid

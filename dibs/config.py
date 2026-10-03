@@ -52,7 +52,11 @@ MEMORY_DIR = Path(os.getenv("DIBS_MEMORY", str(ROOT / "data" / "memory")))
 
 CITY = os.getenv("DIBS_CITY", "Adelaide")
 TIMEZONE = os.getenv("DIBS_TZ", "Australia/Adelaide")
-REGION = os.getenv("DIBS_REGION", "South Australia, Australia")  # geocoding looks here
+REGION = os.getenv("DIBS_REGION", "South Australia, Australia")  # place names are looked up here first
+# The centre of the home city. Inside this circle Dibs uses the hand-checked venue list; outside, it finds venues live.
+HOME_LAT = float(os.getenv("DIBS_HOME_LAT", "-34.9285"))
+HOME_LON = float(os.getenv("DIBS_HOME_LON", "138.6007"))
+HOME_RADIUS_KM = float(os.getenv("DIBS_HOME_RADIUS_KM", "80"))
 
 # iMessage bridge safety: only these handles get replies, and nothing is sent while DRY_RUN=1.
 ALLOWLIST = {h.strip() for h in os.getenv("ALLOWLIST", "").split(",") if h.strip()}
