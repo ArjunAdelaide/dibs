@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -85,6 +86,19 @@ def shared_location(src: sqlite3.Connection, rowid: int) -> str | None:
             if match:
                 return f"Shared location: {match.group(1)},{match.group(2)}"
     return None
+
+
+LOG_PATH = config.DB_PATH.parent / "bridge.log"
+
+
+def log(text: str) -> None:
+    """Print, and keep a copy in data/bridge.log so a problem can be looked up later."""
+    print(text, flush=True)
+    try:
+        with LOG_PATH.open("a") as f:
+            f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {text}\n")
+    except OSError:
+        pass
 
 
 def _osascript(script: str, *args: str) -> None:
@@ -163,7 +177,7 @@ def background(conn: sqlite3.Connection, catalog: Catalog, llm) -> None:
     try:
         sent = alerts.check_due(conn, catalog, send_to_chat) + events.check_due(conn, send_to_chat)
         if sent:
-            print(f"(sent {sent} alert message(s))")
+            log(f"(sent {sent} alert message(s))")
         refunded = ops.refund_stale_paid(conn, catalog, send_to_chat)
         if refunded:
             print(f"(refunded {refunded} paid booking(s) that were not completed in time)")
@@ -172,7 +186,7 @@ def background(conn: sqlite3.Connection, catalog: Catalog, llm) -> None:
             db.kv_set(conn, "memory_consolidated_on", now.date().isoformat())
             print(f"(memory tidy-up: {memory.consolidate_all(models.for_job('memory'))} user(s) updated)")
     except Exception as exc:  # background work must never stop the chat
-        print(f"(background job failed: {type(exc).__name__}: {exc})")
+        log(f"(background job failed: {type(exc).__name__}: {exc})")
 
 
 def run(poll_seconds: float = 1.0) -> None:
@@ -188,55 +202,72 @@ def run(poll_seconds: float = 1.0) -> None:
     catalog = Catalog.load()
     llm = models.for_job("chat")
     for job in models.JOBS:
-        print(f"Model for {job}: {models.for_job(job).describe()}")
+        log(f"Model for {job}: {models.for_job(job).describe()}")
 
     last = db.kv_get(conn, "imessage_last_rowid")
     if last is None:  # first run: start from now, never reply to old history
         last = str(src.execute("SELECT COALESCE(MAX(ROWID), 0) FROM message").fetchone()[0])
         db.kv_set(conn, "imessage_last_rowid", last)
     who = "ANYONE (open access)" if config.OPEN_ACCESS else sorted(config.ALLOWLIST)
-    print(f"Watching Messages (dry_run={config.DRY_RUN}, allowlist={who})")
+    log(f"Watching Messages (dry_run={config.DRY_RUN}, allowlist={who})")
     print("Waiting for a new iMessage. Press Control + C to stop.")
 
     while True:
-        for row in src.execute(QUERY, (int(last),)).fetchall():
+        try:
+            rows = src.execute(QUERY, (int(last),)).fetchall()
+        except sqlite3.Error as exc:  # Messages is writing: look again in a second
+            log(f"(could not read Messages this second: {exc})")
+            rows = []
+        for row in rows:
             last = str(row["rowid"])
             db.kv_set(conn, "imessage_last_rowid", last)
-            text = shared_location(src, row["rowid"]) or row["text"] or decode_attributed_body(row["attributedBody"])
-            is_group = row["style"] == GROUP_STYLE
-            if not text or not should_answer(row["handle"], text, is_group):
-                # Say why, without the message text, so a silent bridge is easy to diagnose.
-                why = "not in ALLOWLIST" if not allowed(row["handle"]) else "group message without the trigger word" if text else "no text"
-                print(f"(ignored a message from {row['handle']}: {why})")
-                continue
-            print(f"<- {row['handle']}: {text}")
-            if config.OPERATOR_HANDLE and row["handle"] == config.OPERATOR_HANDLE and not is_group:
-                answer = ops.operator_command(conn, catalog, send_to_chat, text)  # "booked 3 ref", "failed 3 why", "jobs"
-                if answer is not None:
-                    print(f"-> (operator) {answer}")
-                    send_to_chat(row["chat_guid"], answer)
-                    continue
-            canned = gate(conn, row["handle"], text)
-            if canned is not None:
-                if canned:
-                    print(f"-> {canned}")
-                    send_to_chat(row["chat_guid"], canned)
-                continue
-            print("   (thinking...)")
-            guid = row["chat_guid"]
-            holding = None
-            if config.HOLDING_AFTER_SECONDS > 0:  # a slow turn gets a quick "one sec" so the user is not left waiting
-                holding = threading.Timer(config.HOLDING_AFTER_SECONDS, send_to_chat, args=(guid, "One sec, checking that for you."))
-                holding.start()
-            started = time.monotonic()
-            reply = run_turn(conn, catalog, llm, guid, row["handle"], text, notify_operator, is_group=is_group,
-                             send_later=lambda later, guid=guid: (print(f"-> (later) {later}"), send_to_chat(guid, later)))
-            if holding:
-                holding.cancel()
-            print(f"-> ({time.monotonic() - started:.0f}s) {reply}")
-            send_to_chat(row["chat_guid"], reply)
+            try:
+                handle_message(src, conn, catalog, llm, row)
+            except Exception:  # one bad message must never stop the bridge for everyone else
+                log(f"ERROR while answering {row['handle']}:\n{traceback.format_exc()}")
+                try:
+                    send_to_chat(row["chat_guid"], "Sorry, something went wrong on my side. Try that again in a minute.")
+                except Exception:
+                    log("ERROR: could not send the apology either")
         background(conn, catalog, llm)
         time.sleep(poll_seconds)
+
+
+def handle_message(src: sqlite3.Connection, conn: sqlite3.Connection, catalog: Catalog, llm, row: sqlite3.Row) -> None:
+    text = shared_location(src, row["rowid"]) or row["text"] or decode_attributed_body(row["attributedBody"])
+    is_group = row["style"] == GROUP_STYLE
+    if not text or not should_answer(row["handle"], text, is_group):
+        # Say why, without the message text, so a silent bridge is easy to diagnose.
+        why = "not in ALLOWLIST" if not allowed(row["handle"]) else "group message without the trigger word" if text else "no text"
+        log(f"(ignored a message from {row['handle']}: {why})")
+        return
+    log(f"<- {row['handle']}: {text}")
+    if config.OPERATOR_HANDLE and row["handle"] == config.OPERATOR_HANDLE and not is_group:
+        answer = ops.operator_command(conn, catalog, send_to_chat, text)  # "booked 3 ref", "failed 3 why", "jobs"
+        if answer is not None:
+            log(f"-> (operator) {answer}")
+            send_to_chat(row["chat_guid"], answer)
+            return
+    canned = gate(conn, row["handle"], text)
+    if canned is not None:
+        if canned:
+            log(f"-> {canned}")
+            send_to_chat(row["chat_guid"], canned)
+        return
+    guid = row["chat_guid"]
+    holding = None
+    if config.HOLDING_AFTER_SECONDS > 0:  # a slow turn gets a quick "one sec" so the user is not left waiting
+        holding = threading.Timer(config.HOLDING_AFTER_SECONDS, send_to_chat, args=(guid, "One sec, checking that for you."))
+        holding.start()
+    started = time.monotonic()
+    try:
+        reply = run_turn(conn, catalog, llm, guid, row["handle"], text, notify_operator, is_group=is_group,
+                         send_later=lambda later, guid=guid: (log(f"-> (later) {later}"), send_to_chat(guid, later)))
+    finally:
+        if holding:
+            holding.cancel()
+    log(f"-> ({time.monotonic() - started:.0f}s) {reply}")
+    send_to_chat(guid, reply)
 
 
 def check() -> None:

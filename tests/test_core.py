@@ -32,6 +32,8 @@ DEAL = {"id": "cheap-weekday", "venue_id": "test-bowl", "title": "2 games for $2
 def isolated(tmp_path, monkeypatch):
     """Keep tests away from real memory files, real mail and the network."""
     monkeypatch.setattr("dibs.config.MEMORY_DIR", tmp_path / "memory")
+    monkeypatch.setattr("dibs.config.DB_PATH", tmp_path / "live.db")
+    monkeypatch.setattr("dibs.channels.imessage.LOG_PATH", tmp_path / "bridge.log")
     monkeypatch.setattr("dibs.config.DRY_RUN", True)
     monkeypatch.setattr("dibs.config.SMTP_USER", "")
     monkeypatch.setattr("dibs.config.SMTP_PASSWORD", "")
@@ -732,3 +734,17 @@ def test_router_reads_chains_and_falls_back_across_providers(monkeypatch):
     with pytest.raises(Exception) as err:  # a wrong key is a real fault: it must not be hidden by a fallback
         bad_key.chat([], [])
     assert not isinstance(err.value, models.LLMUnavailable)
+
+
+def test_one_bad_message_does_not_stop_the_bridge(ctx, monkeypatch, tmp_path):
+    """A crash while answering one person is logged and apologised for; the bridge carries on."""
+    sent = []
+    monkeypatch.setattr("dibs.channels.imessage.send_to_chat", lambda guid, text: sent.append(text))
+    monkeypatch.setattr("dibs.config.ALLOWLIST", {"+61400000001"})
+    monkeypatch.setattr("dibs.channels.imessage.run_turn", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    row = {"rowid": 1, "text": "hi", "attributedBody": None, "handle": "+61400000001", "chat_guid": "g1", "style": 45}
+    src = ctx.conn  # no attachments table needed: shared_location is not reached for plain text
+    monkeypatch.setattr("dibs.channels.imessage.shared_location", lambda src, rowid: None)
+    with pytest.raises(RuntimeError):
+        imessage.handle_message(src, ctx.conn, ctx.catalog, None, row)  # the handler raises...
+    assert (tmp_path / "bridge.log").read_text().count("<- +61400000001: hi") == 1  # ...and what came in is on file
