@@ -26,6 +26,10 @@ SIGNATURES = {
     "golfnow": [r"golfnow\."],
     "quick18": [r"quick18\.com"],
     "teeitup": [r"teeitup\.com", r"golfgenius"],
+    "teenet": [r"teenet\.com\.au"],
+    "brsgolf": [r"brsgolf\.com"],
+    "foreup": [r"foreupsoftware\.com"],
+    "golfbox": [r"golfbox\.(dk|net|golf)"],
     "trybooking": [r"trybooking\.com"],
     "humanitix": [r"humanitix\.com"],
     "eventbrite": [r"eventbrite\."],
@@ -33,7 +37,7 @@ SIGNATURES = {
     "square": [r"squareup\.com/appointments", r"square\.site"],
     "bookwhen": [r"bookwhen\.com"],
 }
-BOOK_LINK = re.compile(r'href="([^"]+)"[^>]*>([^<]{0,60}(book|reserve|tee time)[^<]{0,60})<', re.IGNORECASE)
+BOOK_LINK = re.compile(r'href="([^"]+)"[^>]*>([^<]{0,60}(book|reserve|tee time|visitor|green fee|play golf)[^<]{0,60})<', re.IGNORECASE)
 
 
 def detect(html: str) -> str | None:

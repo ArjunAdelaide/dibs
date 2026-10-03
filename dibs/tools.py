@@ -8,6 +8,7 @@ import json
 import re
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable
@@ -22,7 +23,7 @@ _YES = r"(yes|yep|yeah|yup|y|ok|okay|sure|confirm|confirmed|go ahead|do it|book 
 AFFIRMATIVE = re.compile(rf"^\s*{_YES}([\s,]+({_YES}|please|thanks|thank you|mate))*[\s.!]*$", re.IGNORECASE)
 PREF_KEYS = {"name", "usual_party_size", "budget", "max_travel_km"}
 DEFAULT_TRAVEL_KM = 15
-MAX_LIVE_LOOKUPS = 6  # venue sites we read for one suggestion
+MAX_LIVE_LOOKUPS = 8  # venue sites we read for one suggestion, at the same time
 
 
 @dataclass
@@ -84,7 +85,21 @@ def _km(origin: dict, venue: dict) -> float | None:
     return geo.haversine_km(origin["lat"], origin["lon"], venue["lat"], venue["lon"])
 
 
+def get_weather(ctx: ToolContext, venue_id: str, starts_at: str) -> dict:
+    venue = ctx.catalog.venues.get(venue_id)
+    if not venue or venue.get("lat") is None:
+        return {"error": "no location on file for that venue"}
+    weather = geo.forecast(venue["lat"], venue["lon"], _parse_local(ctx, starts_at, venue))
+    return weather or {"error": "no forecast for that time (more than about two weeks ahead, or the service is down)"}
+
+
+def _focus(category: str | None) -> str | None:
+    """In golf mode a search with no category means golf."""
+    return category or (config.FOCUS if config.FOCUS == "golf" else None)
+
+
 def search_venues(ctx: ToolContext, category: str | None = None, near: str | None = None, query: str | None = None) -> dict:
+    category = None if query else _focus(category)
     origin = _origin(ctx, near)
     problem = _cover(ctx, origin)
     found = ctx.catalog.search(category=category, query=query, limit=None)
@@ -170,6 +185,7 @@ def check_site(ctx: ToolContext, venue_id: str, day: str, around_time: str = "16
 def suggest_ideas(ctx: ToolContext, day: str, around_time: str = "16:00", party_size: int = 2, max_km: float | None = None,
                   category: str | None = None) -> dict:
     """Venues with a real open slot near a time: one call does the search and the availability check."""
+    category = _focus(category)
     prefs = db.get_prefs(ctx.conn, ctx.handle)
     origin = prefs.get("location")
     if not origin and not category:
@@ -197,23 +213,32 @@ def suggest_ideas(ctx: ToolContext, day: str, around_time: str = "16:00", party_
             nearby.append((km, venue))
     nearby.sort(key=lambda pair: (not has_connector(pair[1]), pair[0]))  # live venues first, then nearest
 
-    ideas, lookups = [], 0
+    # Read the live feeds at the same time: six venue sites one after the other is the slow part of a reply.
+    live_venues = [venue for _, venue in nearby if has_connector(venue)][:MAX_LIVE_LOOKUPS]
+
+    def read(venue: dict) -> list:
+        try:
+            return slots_for(venue, the_day)
+        except Exception:
+            return []
+
+    with ThreadPoolExecutor(max_workers=MAX_LIVE_LOOKUPS) as pool:
+        feeds = dict(zip([v["id"] for v in live_venues], pool.map(read, live_venues)))
+
+    ideas = []
     for km, venue in nearby:
         idea = {"venue_id": venue["id"], "name": venue["name"], "kind": (venue.get("categories") or ["other"])[0], "live": False}
         if origin:
             idea["distance_km"] = round(km, 1)
-        if has_connector(venue) and lookups < MAX_LIVE_LOOKUPS:
-            lookups += 1
-            try:
-                slots = [s for s in slots_for(venue, the_day) if s.fits(party_size)]
-            except Exception:
-                slots = []
+        if venue["id"] in feeds:
+            slots = [s for s in feeds[venue["id"]] if s.fits(party_size)]
             near = [s for s in slots if abs(int(s.time[:2]) * 60 + int(s.time[3:]) - target) <= 90]
             if not near:
                 continue  # live feed shows nothing near that time: do not suggest it
             best = min(near, key=lambda s: abs(int(s.time[:2]) * 60 + int(s.time[3:]) - target))
             cheapest = min(best.rates, key=lambda r: r.price)
             idea.update(live=True, open_slot=best.time, price_per_person=cheapest.price, rate=cheapest.name,
+                        all_rates=[{"rate": r.name, "price_per_person": r.price} for r in best.rates][:6],
                         other_open_times=[s.time for s in sorted(near, key=lambda s: s.time) if s.time != best.time][:4])
         ideas.append(idea)
 
@@ -551,6 +576,7 @@ HANDLERS = {
     "check_availability": check_availability,
     "check_site": check_site,
     "suggest_ideas": suggest_ideas,
+    "get_weather": get_weather,
     "set_location": set_location,
     "remember": remember,
     "note": note,
@@ -599,6 +625,8 @@ SCHEMAS = [
         {"day": {"type": "string", "description": "Local date, YYYY-MM-DD"}, "around_time": {"type": "string", "description": "HH:MM, 24h"},
          "party_size": {"type": "integer"}, "max_km": {"type": "number", "description": "How far they will travel"},
          "category": CATEGORY}, ["day"]),
+    _fn("get_weather", "The forecast at a venue for one hour: temperature, chance of rain, wind. Useful for outdoor bookings.",
+        {"venue_id": {"type": "string"}, "starts_at": STARTS_AT}, ["venue_id", "starts_at"]),
     _fn("set_location", "Save where the user is, anywhere in the world: a suburb, a city ('Washington DC'), an address, or 'lat,lon'.",
         {"place": {"type": "string"}}, ["place"]),
     _fn("remember", "Save one of the fixed facts the booking forms need.",
@@ -640,6 +668,16 @@ SCHEMAS = [
     _fn("my_bookings", "The user's recent bookings and their status.", {}, []),
     _fn("remove_card", "Delete the user's saved card from Stripe when they ask.", {}, []),
 ]
+
+
+EVENT_TOOLS = {"find_events", "create_event_alert"}
+
+
+def schemas() -> list[dict]:
+    """The tools the model sees. Golf mode leaves out ticketed events."""
+    if config.FOCUS == "golf":
+        return [s for s in SCHEMAS if s["function"]["name"] not in EVENT_TOOLS]
+    return SCHEMAS
 
 
 def run_tool(ctx: ToolContext, name: str, arguments: str) -> str:

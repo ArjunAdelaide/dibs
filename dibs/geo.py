@@ -74,3 +74,18 @@ def timezone_at(lat: float, lon: float, client: httpx.Client | None = None) -> s
         return resp.json().get("timezone")
     except (httpx.HTTPError, ValueError):
         return None
+
+
+def forecast(lat: float, lon: float, when, client: httpx.Client | None = None) -> dict | None:
+    """Weather for one hour at a place, up to about two weeks ahead (Open-Meteo, free, no key)."""
+    try:
+        resp = (client or _client()).get("https://api.open-meteo.com/v1/forecast", params={
+            "latitude": lat, "longitude": lon, "timezone": "auto", "forecast_days": 16,
+            "hourly": "temperature_2m,precipitation_probability,wind_speed_10m"})
+        resp.raise_for_status()
+        hourly = resp.json()["hourly"]
+        i = hourly["time"].index(when.strftime("%Y-%m-%dT%H:00"))
+    except (httpx.HTTPError, ValueError, KeyError):
+        return None
+    return {"temperature_c": hourly["temperature_2m"][i], "chance_of_rain_percent": hourly["precipitation_probability"][i],
+            "wind_kmh": hourly["wind_speed_10m"][i]}

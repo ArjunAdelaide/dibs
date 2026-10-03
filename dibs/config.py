@@ -50,6 +50,8 @@ DEALS_PATH = ROOT / "data" / "deals.json"
 EVENTS_PATH = ROOT / "data" / "events.json"
 MEMORY_DIR = Path(os.getenv("DIBS_MEMORY", str(ROOT / "data" / "memory")))
 
+# What Dibs books. Empty = every experience. "golf" = a golf booking agent (the other code stays, switched off).
+FOCUS = os.getenv("DIBS_FOCUS", "").strip().lower()
 CITY = os.getenv("DIBS_CITY", "Adelaide")
 TIMEZONE = os.getenv("DIBS_TZ", "Australia/Adelaide")
 REGION = os.getenv("DIBS_REGION", "South Australia, Australia")  # place names are looked up here first

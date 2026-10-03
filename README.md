@@ -11,6 +11,10 @@ Text it "I want to do something tomorrow at 4pm". It asks where you are and how 
 
 **Try it:** send an iMessage to `iamdibsagent@gmail.com`. It answers when the host Mac is on.
 
+**Golf mode.** Set `DIBS_FOCUS=golf` and Dibs is a golf booking agent: tee times at public courses, 9 or 18 holes, twilight rates, a weekly game, the forecast at the tee time. Every other experience stays in the code, switched off. Leave `DIBS_FOCUS` empty for all experiences.
+
+In Adelaide, Dibs reads live tee times at 6 courses (North Adelaide North and Par 3, Sandy Creek, Flagstaff Hill, Mount Osmond, Regency Park) through MiClub and Quick18. The other courses use systems it cannot read yet (member-only sheets, BRS Golf, TeeNet, TeeItUp, YourGolfBooking); for those it sends the booking page.
+
 **Home city and everywhere else.** Dibs has a home city (Adelaide) with a hand-checked venue list, live slots, deals and payments. Anywhere else in the world it still works: it finds venues near the user on OpenStreetMap, events near them on Ticketmaster, uses the user's own time zone, and sends the venue's booking page. In the background it reads each new venue's website and turns on live slots where the booking system is one it can read. Set `DIBS_CITY`, `DIBS_HOME_LAT`, `DIBS_HOME_LON` and the venue list to make another city the home.
 
 ## Setup

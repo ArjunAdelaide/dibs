@@ -10,7 +10,7 @@ from . import config, db, geo, memory
 from .catalog import Catalog
 from .llm import LLM, LLMUnavailable
 from . import executors
-from .tools import AFFIRMATIVE, SCHEMAS, ToolContext, confirm_booking, run_tool
+from .tools import AFFIRMATIVE, ToolContext, confirm_booking, run_tool, schemas
 
 SYSTEM = """You are Dibs, a texting concierge for experiences: bowling, golf, driving ranges, mini golf, laser tag, VR, escape rooms, arcades, climbing, karting, and ticketed events (concerts, festivals, sport).
 You work anywhere in the world. Your home city is {city}: there you have a hand-checked venue list, live slots and payments. Elsewhere you find venues and events near the user and send the venue's booking page; live slots exist only where a venue's booking system is one you can read. Never tell a user you only cover {city}.
@@ -46,6 +46,17 @@ How you work:
 - Write times the way people text them (4pm, 4:02pm), never 16:02. Write activity names in plain words (mini golf, not mini_golf).
 - Write like a friend texting: short lines, no markdown, no headings, no emoji spam. Under 600 characters.
 {group_note}"""
+
+GOLF = """
+GOLF MODE. Right now Dibs books golf and nothing else: tee times at public courses, par 3 courses and driving ranges.
+- If asked for another activity or for event tickets, say Dibs does golf for now and other experiences come later. Do not book them.
+- When they did not name a course, offer up to 3 tee times at different courses, nearest first, one line each: course, distance, time, price a player. When they named the course, go straight to propose_booking.
+- A tee time takes 1 to 4 players. Ask how many players if you do not know. Ask 9 or 18 holes only when the course offers both: the rate names say which is which, and you pass the rate you pick to propose_booking.
+- Twilight and weekday rates are the cheap ones: when one fits the time asked, offer it.
+- "My usual Saturday game" is a weekly booking: create_alert with every_week=true.
+- When they pick a tee time more than a few hours away, you may add the forecast in a few words (get_weather). Do not call it for every option.
+- Talk like someone who plays: tee time, round, nine, eighteen, twilight. Keep it short.
+"""
 
 GROUP_NOTE = "- This is a group chat. Messages are prefixed with the sender. Help the group converge on one plan; anyone in the chat can say yes."
 
@@ -89,7 +100,7 @@ def run_turn(
         city=config.CITY, now=now.strftime("%A %d %B %Y %I:%M%p"), tz=user_tz, handle=handle,
         prefs=json.dumps(prefs) if prefs else "none yet", pending=_pending(conn, catalog, conv_id), memory=memory.context(handle),
         group_note=GROUP_NOTE if is_group else "",
-    )
+    ) + (GOLF if config.FOCUS == "golf" else "")
     messages: list[dict] = [{"role": "system", "content": system}]
     for row in past:
         content = f"{row['handle']}: {row['content']}" if is_group and row["role"] == "user" else row["content"]
@@ -118,7 +129,7 @@ def run_turn(
             return reply
     for _ in range(config.MAX_TOOL_ROUNDS):
         try:
-            msg = llm.chat(messages, SCHEMAS)
+            msg = llm.chat(messages, schemas())
         except LLMUnavailable:
             reply = "I'm having trouble thinking right now. Text me again in a minute."
             break
@@ -134,7 +145,14 @@ def run_turn(
                 reply = json.loads(result)["shown_to_user"]  # the user sees the code's summary, word for word
         if reply:
             break
+    if not reply:  # the model kept calling tools: make it answer with what it has, without tools
+        try:
+            messages.append({"role": "user", "content": "(system) Stop using tools. Answer the user now in one short text with what you "
+                                                        "know. If you are not sure what they mean, ask one short question."})
+            reply = (llm.chat(messages, []).get("content") or "").strip()
+        except LLMUnavailable:
+            reply = ""
     if not reply:
-        reply = "Sorry, I got tangled up there. Can you say that again?"
+        reply = "Sorry, I lost track there. What would you like to book?"
     db.add_message(conn, conv_id, "dibs", "assistant", reply)
     return reply

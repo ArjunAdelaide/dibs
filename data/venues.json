@@ -296,16 +296,16 @@
     "lat": -34.7793424,
     "lon": 138.48645,
     "phone": "+61 8 8248 3832",
-    "website": "http://www.btmgolf.com.au/new_nth_haven_home/",
-    "booking_url": null,
-    "booking_platform": null,
+    "website": "https://northhavengc.com.au/",
+    "booking_url": "https://northhavengc.com.au/index.php/play-golf/",
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
     "verified": false,
     "active": true,
     "source": "osm",
-    "osm_id": "way/4853070"
+    "osm_id": "way/4853070",
+    "booking_platform": null
   },
   {
     "id": "glenelg-golf-course",
@@ -318,16 +318,17 @@
     "lat": -34.961561,
     "lon": 138.5282266,
     "phone": null,
-    "website": null,
-    "booking_url": null,
-    "booking_platform": null,
+    "website": "https://www.glenelggolf.com/cms/",
+    "booking_url": "https://www.glenelggolf.com/cms/pro-shop/information-for-guests-visitors/",
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
     "verified": false,
     "active": true,
     "source": "osm",
-    "osm_id": "way/4989486"
+    "osm_id": "way/4989486",
+    "contact_email": "reception@glenelggolf.com",
+    "booking_platform": "miclub"
   },
   {
     "id": "mount-osmond-golf-course",
@@ -340,16 +341,29 @@
     "lat": -34.9634931,
     "lon": 138.6628739,
     "phone": null,
-    "website": null,
-    "booking_url": null,
-    "booking_platform": null,
+    "website": "https://www.mogc.com.au/cms/",
+    "booking_url": "https://www.mogc.com.au/cms/public-bookings/",
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
-    "verified": false,
+    "verified": true,
     "active": true,
     "source": "osm",
-    "osm_id": "way/23906662"
+    "osm_id": "way/23906662",
+    "connector": {
+      "type": "miclub",
+      "base_url": "https://www.mogc.com.au",
+      "resource_id": "3000000",
+      "fee_group_ids": [
+        "101624",
+        "101625"
+      ],
+      "fee_group_names": [
+        "18 Holes (Public)",
+        "9 Holes (Public)"
+      ]
+    },
+    "booking_platform": "miclub"
   },
   {
     "id": "drummond-golf-driving-range",
@@ -385,7 +399,7 @@
     "lon": 138.4980949,
     "phone": null,
     "website": "https://www.grangegolf.com.au/",
-    "booking_url": null,
+    "booking_url": "https://www.grangegolf.com.au/cms/golf/golf-grange/",
     "booking_platform": "miclub",
     "hours": null,
     "price_notes": "",
@@ -429,16 +443,30 @@
     "lat": -35.0576451,
     "lon": 138.5864588,
     "phone": null,
-    "website": null,
-    "booking_url": null,
-    "booking_platform": null,
+    "website": "https://www.fhgc.com.au/",
+    "booking_url": "https://flagstaffhill.miclub.com.au/cms/public-bookings/",
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
-    "verified": false,
+    "verified": true,
     "active": true,
     "source": "osm",
-    "osm_id": "way/28902219"
+    "osm_id": "way/28902219",
+    "connector": {
+      "type": "miclub",
+      "base_url": "https://flagstaffhill.miclub.com.au",
+      "resource_id": "3000000",
+      "fee_group_ids": [
+        "102518",
+        "102519"
+      ],
+      "fee_group_names": [
+        "18 Hole - Public",
+        "9 Hole - Public"
+      ]
+    },
+    "contact_email": "admin@fhgc.com.au",
+    "booking_platform": "miclub"
   },
   {
     "id": "stirling-golf-club",
@@ -451,16 +479,17 @@
     "lat": -34.9898539,
     "lon": 138.7426682,
     "phone": null,
-    "website": null,
-    "booking_url": null,
-    "booking_platform": null,
+    "website": "https://www.stirlinggolfclub.com/",
+    "booking_url": "https://visitors.brsgolf.com/stirling#/course/1",
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
     "verified": false,
     "active": true,
     "source": "osm",
-    "osm_id": "way/30505173"
+    "osm_id": "way/30505173",
+    "contact_email": "secretary@stirlinggolfclub.com",
+    "booking_platform": "brsgolf"
   },
   {
     "id": "the-vines-of-reynella",
@@ -473,16 +502,18 @@
     "lat": -35.0947496,
     "lon": 138.5767613,
     "phone": null,
-    "website": null,
-    "booking_url": null,
-    "booking_platform": null,
+    "website": "https://www.vinesgolfclub.com.au/cms/",
+    "booking_url": "https://www.vinesgolfclub.com.au/cms/public-bookings/",
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
     "verified": false,
     "active": true,
     "source": "osm",
-    "osm_id": "way/32288497"
+    "osm_id": "way/32288497",
+    "contact_email": "info@vinesgolfclub.com.au",
+    "booking_platform": "miclub",
+    "connector": null
   },
   {
     "id": "bowland-salisbury",
@@ -517,16 +548,16 @@
     "lat": -34.8111727,
     "lon": 138.6252958,
     "phone": null,
-    "website": null,
-    "booking_url": null,
-    "booking_platform": null,
+    "website": "https://mawsonlakesgolfclub.com.au/",
+    "booking_url": "https://mawsonlakesgolfclub.com.au/visitors/",
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
     "verified": false,
     "active": true,
     "source": "osm",
-    "osm_id": "way/80336393"
+    "osm_id": "way/80336393",
+    "booking_platform": null
   },
   {
     "id": "3-par-golf-course",
@@ -562,7 +593,7 @@
     "lon": 138.5093781,
     "phone": "+61 8 8356 5511",
     "website": "https://www.royaladelaidegolf.com.au/",
-    "booking_url": null,
+    "booking_url": "https://www.royaladelaidegolf.com.au/cms/golf/play-golf/",
     "booking_platform": "miclub",
     "hours": null,
     "price_notes": "",
@@ -571,7 +602,8 @@
     "active": true,
     "source": "osm",
     "osm_id": "way/82599640",
-    "contact_email": "ragc@royaladelaidegolf.com.au"
+    "contact_email": "ragc@royaladelaidegolf.com.au",
+    "connector": null
   },
   {
     "id": "elizabeth-bowland",
@@ -606,16 +638,16 @@
     "lat": -34.8408101,
     "lon": 138.7587311,
     "phone": null,
-    "website": null,
+    "website": "https://www.highercombegolf.com.au/",
     "booking_url": null,
-    "booking_platform": null,
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
     "verified": false,
     "active": true,
     "source": "osm",
-    "osm_id": "way/177586947"
+    "osm_id": "way/177586947",
+    "booking_platform": "teeitup"
   },
   {
     "id": "kooyonga-golf-club",
@@ -674,16 +706,16 @@
     "lat": -34.986293,
     "lon": 138.8478679,
     "phone": null,
-    "website": null,
+    "website": "http://www.oakbankgolfclub.com/",
     "booking_url": null,
-    "booking_platform": null,
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
     "verified": false,
     "active": true,
     "source": "osm",
-    "osm_id": "way/181988477"
+    "osm_id": "way/181988477",
+    "booking_platform": null
   },
   {
     "id": "west-beach-mini-golf",
@@ -718,9 +750,8 @@
     "lat": -34.8440371,
     "lon": 138.6672342,
     "phone": null,
-    "website": null,
+    "website": "https://www.valleyviewgolfcourse.com.au/",
     "booking_url": null,
-    "booking_platform": null,
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
@@ -885,16 +916,17 @@
     "lat": -35.1222142,
     "lon": 138.5538474,
     "phone": null,
-    "website": null,
-    "booking_url": null,
-    "booking_platform": null,
+    "website": "https://thaxtedparkgolfclub.com.au/",
+    "booking_url": "https://thaxtedparkgolfclub.com.au/play-golf/",
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
     "verified": false,
     "active": true,
     "source": "osm",
-    "osm_id": "way/344040225"
+    "osm_id": "way/344040225",
+    "contact_email": "%20info@thaxtedparkgolfclub.com.au",
+    "booking_platform": "miclub"
   },
   {
     "id": "north-lakes-golf-course",
@@ -907,9 +939,8 @@
     "lat": -34.6605316,
     "lon": 138.6823655,
     "phone": null,
-    "website": null,
+    "website": "http://www.btmgolf.com.au/",
     "booking_url": null,
-    "booking_platform": null,
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
@@ -929,16 +960,20 @@
     "lat": -34.8641965,
     "lon": 138.5678675,
     "phone": null,
-    "website": null,
-    "booking_url": null,
-    "booking_platform": null,
+    "website": "https://regencyparkgolf.com.au/",
+    "booking_url": "https://regencyparkgolf.com.au/price-list/",
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
-    "verified": false,
+    "verified": true,
     "active": true,
     "source": "osm",
-    "osm_id": "way/556152613"
+    "osm_id": "way/556152613",
+    "connector": {
+      "type": "quick18",
+      "base_url": "https://regencypark.quick18.com"
+    },
+    "booking_platform": "quick18"
   },
   {
     "id": "penfield-golf-club",
@@ -951,16 +986,16 @@
     "lat": -34.7451399,
     "lon": 138.6413867,
     "phone": null,
-    "website": null,
+    "website": "https://penfieldgolfclub.com.au/",
     "booking_url": null,
-    "booking_platform": null,
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
     "verified": false,
     "active": true,
     "source": "osm",
-    "osm_id": "way/565647498"
+    "osm_id": "way/565647498",
+    "booking_platform": null
   },
   {
     "id": "tea-tree-gully-golf-club",
@@ -973,16 +1008,17 @@
     "lat": -34.8024638,
     "lon": 138.7273757,
     "phone": null,
-    "website": null,
+    "website": "https://www.ttggolfclub.com.au/cms/",
     "booking_url": null,
-    "booking_platform": null,
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
     "verified": false,
     "active": true,
     "source": "osm",
-    "osm_id": "way/570534608"
+    "osm_id": "way/570534608",
+    "contact_email": "admin@ttggolfclub.com.au",
+    "booking_platform": "miclub"
   },
   {
     "id": "marion-golf-park",
@@ -995,9 +1031,8 @@
     "lat": -35.0444388,
     "lon": 138.5273056,
     "phone": null,
-    "website": null,
+    "website": "http://www.btmgolf.com.au/mariongolfpark/",
     "booking_url": null,
-    "booking_platform": null,
     "hours": null,
     "price_notes": "",
     "off_peak_notes": "",
@@ -1088,7 +1123,7 @@
     "lon": 138.7891496,
     "phone": "+61 8 8388 8038",
     "website": "http://www.echungagolf.com.au/",
-    "booking_url": null,
+    "booking_url": "https://www.echungagolf.com.au/green-fees.html",
     "booking_platform": null,
     "hours": null,
     "price_notes": "",
@@ -1157,5 +1192,27 @@
     "active": true,
     "source": "manual, checked 2026-10-02",
     "contact_email": "info@littleparagolf.com.au"
+  },
+  {
+    "id": "the-pat-gc",
+    "name": "The Pat GC (West Beach)",
+    "categories": [
+      "golf"
+    ],
+    "area": "West Beach",
+    "address": "Military Road, West Beach SA 5024",
+    "lat": -34.9486,
+    "lon": 138.5075,
+    "phone": "08 8356 4811",
+    "website": "https://www.thepatgc.com.au/",
+    "booking_url": "https://yourgolfbooking.com/venues/west-beach-parks-golf/booking/bays",
+    "hours": null,
+    "price_notes": "",
+    "off_peak_notes": "",
+    "verified": false,
+    "active": true,
+    "source": "manual, found by web search 2026-10-07",
+    "contact_email": "proshop@westbeachparks.com.au",
+    "booking_platform": null
   }
 ]

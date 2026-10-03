@@ -32,7 +32,7 @@ def parse(page: str, base_url: str) -> list[Slot]:
             slot.max_players = int(players.group(2) or players.group(1))
         for name, cell in zip(names, CELL.findall(rest)):
             price, link = PRICE.search(cell), LINK.search(cell)
-            if price and link:
+            if price and link and float(price.group(1).replace(",", "")) > 0:  # $0 rates are passes or member rates
                 slot.rates.append(Rate(name, float(price.group(1).replace(",", "")),
                                        base_url.rstrip("/") + html.unescape(link.group(1))))
         if slot.rates:

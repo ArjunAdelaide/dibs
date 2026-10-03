@@ -42,6 +42,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr("dibs.config.OPEN_ACCESS", False)
     monkeypatch.setattr("dibs.config.SUPERVISED_CHECKOUT", False)
     monkeypatch.setattr("dibs.config.BOOKING_EMAIL", "")
+    monkeypatch.setattr("dibs.config.FOCUS", "")
     monkeypatch.setattr("dibs.geo.timezone_at", lambda lat, lon, client=None: None)  # no network in tests
     monkeypatch.setattr("dibs.config.BLOCKLIST", set())
     monkeypatch.setattr("dibs.config.STRIPE_SECRET_KEY", "")
@@ -912,3 +913,37 @@ def test_new_person_gets_the_welcome_note_once(ctx, monkeypatch):
     imessage.handle_message(ctx.conn, ctx.conn, ctx.catalog, None, {**row, "rowid": 2, "text": "bowling?"})
     assert sent[0] == "Hey!" and "I'm Dibs, an AI agent" in sent[1] and "STOP" in sent[1] and "privacy" in sent[1].lower()
     assert sent[2:] == ["Hey!"]  # the note goes out once
+
+
+# --- golf mode ---
+
+def test_golf_mode_narrows_search_tools_and_prompt(ctx, monkeypatch):
+    from dibs import agent, tools
+    ctx.catalog.venues["links"] = {"id": "links", "name": "City Links", "categories": ["golf"], "lat": -34.91, "lon": 138.6}
+    assert {v["name"] for v in search_venues(ctx)["venues"]} == {"Test Bowl", "City Links"}  # every experience
+    monkeypatch.setattr("dibs.config.FOCUS", "golf")
+    assert [v["name"] for v in search_venues(ctx)["venues"]] == ["City Links"]  # golf only, with no category given
+    assert [v["name"] for v in search_venues(ctx, query="Test Bowl")["venues"]] == ["Test Bowl"]  # a named venue is still found
+    names = {s["function"]["name"] for s in tools.schemas()}
+    assert "find_events" not in names and "get_weather" in names and "propose_booking" in names
+    seen = {}
+
+    class Capture:
+        def chat(self, messages, tool_list):
+            seen["system"] = messages[0]["content"]
+            return {"role": "assistant", "content": "ok"}
+
+    agent.run_turn(ctx.conn, ctx.catalog, Capture(), "c1", ctx.handle, "bowling tonight?", print, now=NOW)
+    assert "GOLF MODE" in seen["system"]
+
+
+def test_quick18_ignores_zero_dollar_rates():
+    page = FIXTURE.read_text().replace('mtrxPrice">$9.00', 'mtrxPrice">$0.00')
+    slots = quick18.parse(page, "https://x.quick18.com")
+    assert all(r.price > 0 for s in slots for r in s.rates)
+
+
+def test_agent_answers_in_text_when_tool_rounds_run_out(ctx, monkeypatch):
+    monkeypatch.setattr("dibs.config.MAX_TOOL_ROUNDS", 2)
+    llm = ScriptedLLM([("search_venues", {}), ("search_venues", {}), "Which course did you mean?"])
+    assert run_turn(ctx.conn, ctx.catalog, llm, "c1", ctx.handle, "the second one", print, now=NOW) == "Which course did you mean?"
