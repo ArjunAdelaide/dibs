@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 from .. import alerts, config, db, events, memory, ops
 from ..agent import run_turn
 from ..catalog import Catalog
-from ..llm import OpenAICompatLLM
+from .. import llm as models
 
 CHAT_DB = Path.home() / "Library" / "Messages" / "chat.db"
 GROUP_STYLE = 43
@@ -170,7 +170,7 @@ def background(conn: sqlite3.Connection, catalog: Catalog, llm) -> None:
         now = datetime.now(ZoneInfo(config.TIMEZONE))
         if now.hour >= 3 and db.kv_get(conn, "memory_consolidated_on") != now.date().isoformat():
             db.kv_set(conn, "memory_consolidated_on", now.date().isoformat())
-            print(f"(memory tidy-up: {memory.consolidate_all(llm)} user(s) updated)")
+            print(f"(memory tidy-up: {memory.consolidate_all(models.for_job('memory'))} user(s) updated)")
     except Exception as exc:  # background work must never stop the chat
         print(f"(background job failed: {type(exc).__name__}: {exc})")
 
@@ -186,7 +186,9 @@ def run(poll_seconds: float = 1.0) -> None:
     src.row_factory = sqlite3.Row
     conn = db.connect()
     catalog = Catalog.load()
-    llm = OpenAICompatLLM()
+    llm = models.for_job("chat")
+    for job in models.JOBS:
+        print(f"Model for {job}: {models.for_job(job).describe()}")
 
     last = db.kv_get(conn, "imessage_last_rowid")
     if last is None:  # first run: start from now, never reply to old history

@@ -116,7 +116,9 @@ def check_site(ctx: ToolContext, venue_id: str, day: str, around_time: str = "16
     def work() -> str:
         with _one_browser:
             try:
-                res = browser.browse(venue["booking_url"], goal, ctx.llm)
+                # the browser agent gets its own (stronger) model when one is set
+                browser_llm = ctx.llm.job("browser") if hasattr(ctx.llm, "job") else ctx.llm
+                res = browser.browse(venue["booking_url"], goal, browser_llm)
             except Exception as exc:
                 res = browser.BrowseResult(status="failed", result={"reason": type(exc).__name__})
         return _site_report(venue, f"{the_day:%a %-d %b}", res)

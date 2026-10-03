@@ -26,6 +26,24 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "gemini-flash-lite-latest")
 LLM_FALLBACK_MODELS = [m.strip() for m in os.getenv("LLM_FALLBACK_MODELS", "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.5-flash").split(",") if m.strip()]
 
+# Model providers: any OpenAI-compatible endpoint. The default one comes from LLM_BASE_URL / LLM_API_KEY;
+# add more with PROVIDER_<NAME>_URL and PROVIDER_<NAME>_KEY.
+DEFAULT_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
+PROVIDERS = {DEFAULT_PROVIDER: (LLM_BASE_URL, LLM_API_KEY)}
+for _name, _value in os.environ.items():
+    if _name.startswith("PROVIDER_") and _name.endswith("_URL"):
+        _provider = _name[len("PROVIDER_"):-len("_URL")]
+        PROVIDERS[_provider.lower()] = (_value, os.getenv(f"PROVIDER_{_provider}_KEY", ""))
+
+
+def _chain(env_name: str) -> list[str]:
+    """A job's models, first choice then backups. Defaults to LLM_MODEL then LLM_FALLBACK_MODELS."""
+    listed = [m.strip() for m in os.getenv(env_name, "").split(",") if m.strip()]
+    return listed or [LLM_MODEL] + [m for m in LLM_FALLBACK_MODELS if m != LLM_MODEL]
+
+
+LLM_CHAINS = {"chat": _chain("LLM_CHAT"), "browser": _chain("LLM_BROWSER"), "memory": _chain("LLM_MEMORY")}
+
 DB_PATH = Path(os.getenv("DIBS_DB", str(ROOT / "data" / "dibs.db")))
 VENUES_PATH = ROOT / "data" / "venues.json"
 DEALS_PATH = ROOT / "data" / "deals.json"

@@ -111,9 +111,9 @@ def consolidate_all(llm) -> int:
 if __name__ == "__main__":
     import sys
 
-    from .llm import OpenAICompatLLM
+    from . import llm as models
 
     if sys.argv[1:] == ["consolidate"]:
-        print(f"Updated memory for {consolidate_all(OpenAICompatLLM())} user(s).")
+        print(f"Updated memory for {consolidate_all(models.for_job('memory'))} user(s).")
     else:
         print("Usage: python -m dibs.memory consolidate")

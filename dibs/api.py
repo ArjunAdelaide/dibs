@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from . import db
 from .agent import run_turn
 from .catalog import Catalog
-from .llm import OpenAICompatLLM
+from . import llm as models
 
 app = FastAPI(title="Dibs")
 conn = db.connect()
@@ -33,7 +33,7 @@ def health() -> dict:
 @app.post("/inbound")
 def inbound(msg: Inbound) -> dict:
     global _llm
-    _llm = _llm or OpenAICompatLLM()
+    _llm = _llm or models.for_job("chat")
     alerts: list[str] = []
     reply = run_turn(conn, catalog, _llm, msg.conv_id or f"api;-;{msg.handle}", msg.handle, msg.text,
                      alerts.append, is_group=msg.is_group)

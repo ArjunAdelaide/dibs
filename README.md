@@ -22,7 +22,12 @@ cp .env.example .env        # then add your free Gemini key
 .venv/bin/pytest            # no key needed
 ```
 
-Pick a model your key can use: `.venv/bin/python -m dibs.llm` lists them. Put the name in `LLM_MODEL`.
+**Models.** Each job has its own list of models, first choice then backups: `LLM_CHAT` (fast and cheap), `LLM_BROWSER` (the strongest you can afford), `LLM_MEMORY` (cheap). A model is written `provider@model`. Any OpenAI-compatible provider works; add one with `PROVIDER_<NAME>_URL` and `PROVIDER_<NAME>_KEY`. When a model is busy, out of quota or retired, the next one answers.
+
+```bash
+.venv/bin/python -m dibs.llm            # the model list for each job
+.venv/bin/python -m dibs.llm --models   # the models your default key can use
+```
 
 ## Run it
 
@@ -181,7 +186,7 @@ dibs/browser.py      browser agent: reads open times from a venue's booking site
 dibs/supervised.py   phase A: prepared checkout window, reads the confirmation
 dibs/executors.py    booking routes: link, email, page, concierge, paid
 dibs/payments.py     Stripe: saved card, charge, refund
-dibs/llm.py          any OpenAI-compatible endpoint (Gemini free, Ollama, paid later)
+dibs/llm.py          model router: a model list per job, any OpenAI-compatible provider
 dibs/channels/       imessage.py (Mac bridge)
 dibs/cli.py          terminal simulator
 dibs/ops.py          concierge console

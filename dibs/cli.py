@@ -9,7 +9,7 @@ import argparse
 from . import db
 from .agent import run_turn
 from .catalog import Catalog
-from .llm import OpenAICompatLLM
+from . import llm as models
 
 
 def main() -> None:
@@ -21,7 +21,7 @@ def main() -> None:
 
     conn = db.connect()
     catalog = Catalog.load()
-    llm = OpenAICompatLLM()
+    llm = models.for_job("chat")
     conv_id = args.chat or f"cli;-;{args.handle}"
     print(f"Texting Dibs as {args.handle} ({len(catalog.venues)} venues, {len(catalog.deals)} deals). Ctrl-D to quit.")
     while True:

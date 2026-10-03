@@ -689,3 +689,46 @@ def test_supervised_autofill_rules():
     assert filled == 3  # no BOOKING_EMAIL in tests, so email stays empty; card and promo are never touched
     assert supervised.read_reference("Your Reservation #: AB12-99") == "AB12-99"
     assert supervised.read_reference("Book now and save") is None
+
+
+# --- model router ---
+
+from dibs import llm as models  # noqa: E402
+
+
+class FakeClient:
+    """Stands in for an OpenAI-compatible client: fails for some models, answers for others."""
+
+    def __init__(self, provider, failing, calls):
+        self.provider, self.failing, self.calls = provider, failing, calls
+        self.chat = self
+        self.completions = self
+
+    def create(self, model, messages, temperature, **extra):
+        from types import SimpleNamespace
+        import httpx
+        from openai import APIStatusError
+        self.calls.append(f"{self.provider}@{model}")
+        if model in self.failing:
+            request = httpx.Request("POST", "https://x.test")
+            raise APIStatusError("busy", response=httpx.Response(self.failing[model], request=request), body=None)
+        message = SimpleNamespace(model_dump=lambda exclude_none: {"role": "assistant", "content": f"from {self.provider}@{model}"})
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+def test_router_reads_chains_and_falls_back_across_providers(monkeypatch):
+    monkeypatch.setattr("dibs.config.DEFAULT_PROVIDER", "gemini")
+    assert models.parse_chain(["openrouter@meta/llama-x:free", "gemini-lite"]) == [("openrouter", "meta/llama-x:free"), ("gemini", "gemini-lite")]
+    calls = []
+    router = models.Router("browser", chain=["openrouter@strong", "gemini-lite", "gemini-backup"],
+                           client_for=lambda provider: FakeClient(provider, {"strong": 429, "gemini-lite": 503}, calls))
+    assert router.describe() == "openrouter@strong -> gemini@gemini-lite -> gemini@gemini-backup"
+    assert router.chat([{"role": "user", "content": "hi"}], [])["content"] == "from gemini@gemini-backup"
+    assert calls == ["openrouter@strong", "gemini@gemini-lite", "gemini@gemini-backup"] and router.used == {"gemini@gemini-backup": 1}
+    all_down = models.Router("chat", chain=["a", "b"], client_for=lambda provider: FakeClient(provider, {"a": 429, "b": 404}, calls))
+    with pytest.raises(models.LLMUnavailable):
+        all_down.chat([], [])
+    bad_key = models.Router("chat", chain=["a"], client_for=lambda provider: FakeClient(provider, {"a": 401}, calls))
+    with pytest.raises(Exception) as err:  # a wrong key is a real fault: it must not be hidden by a fallback
+        bad_key.chat([], [])
+    assert not isinstance(err.value, models.LLMUnavailable)

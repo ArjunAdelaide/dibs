@@ -186,10 +186,10 @@ def browse(start_url: str, goal: str, llm: LLM, mode: str = "read", max_steps: i
 if __name__ == "__main__":
     import sys
 
-    from .llm import OpenAICompatLLM
+    from . import llm as models
 
     if len(sys.argv) != 3:
         raise SystemExit('Usage: python -m dibs.browser "<booking url>" "<goal>"')
-    res = browse(sys.argv[1], sys.argv[2], OpenAICompatLLM())
+    res = browse(sys.argv[1], sys.argv[2], models.for_job("browser"))
     print("\n".join(res.log))
     print(f"\nstatus: {res.status} after {res.steps} step(s) at {res.url}\nresult: {json.dumps(res.result, indent=2)}")
