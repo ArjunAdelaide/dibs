@@ -148,6 +148,10 @@ failed 3 4pm is full                 (releases the hold)
 jobs                                 (lists what is waiting)
 ```
 
+**Supervised checkout (phase A).** With `SUPERVISED_CHECKOUT=1`, a held booking at a supported venue (Quick18 for now) opens a browser window on the Mac at the exact slot, with the number of players chosen and a Dibs banner that shows the customer's details. On the next pages Dibs fills in the name, email and phone. It never ticks terms, never presses continue or pay, and never touches card fields. You check the page and pay; Dibs reads the reference on the confirmation page, captures the hold and texts the customer. `open 3` opens the window again.
+
+![Supervised checkout on a Quick18 page](docs/supervised-checkout.png)
+
 The same works in a terminal: `.venv/bin/python -m dibs.ops list | booked 3 "ref" | failed 3 "reason"`.
 
 ## Data
@@ -174,6 +178,7 @@ dibs/events.py       concerts, festivals, sport: search and ticket alerts
 dibs/memory.py       text-file memory and the daily tidy-up
 dibs/geo.py          distance and place lookup
 dibs/browser.py      browser agent: reads open times from a venue's booking site
+dibs/supervised.py   phase A: prepared checkout window, reads the confirmation
 dibs/executors.py    booking routes: link, email, page, concierge, paid
 dibs/payments.py     Stripe: saved card, charge, refund
 dibs/llm.py          any OpenAI-compatible endpoint (Gemini free, Ollama, paid later)

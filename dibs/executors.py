@@ -10,7 +10,7 @@ import smtplib
 from datetime import datetime
 from email.message import EmailMessage
 
-from . import config, db, memory, payments
+from . import config, db, memory, payments, supervised
 from .connectors import has_connector, slots_for
 
 
@@ -126,10 +126,15 @@ def pay_and_hand_over(ctx, proposal, venue: dict, rate, record) -> dict:
     except payments.PaymentError as exc:
         return {"error": f"payment failed: {exc}. Nothing was booked. Tell the user plainly and offer the venue link instead: {rate.url}"}
     booking_id = record("paid_needs_human", total, intent)
+    window = ""
+    if supervised.can_supervise(venue):  # phase A: the booking is prepared in a window on the Mac
+        customer = supervised.customer_details(db.get_prefs(ctx.conn, ctx.handle).get("name"), ctx.handle)
+        supervised.launch(booking_id, venue, rate.url, proposal["party_size"], f"${total / 100:.2f}", customer)
+        window = "A browser window on the Mac has it ready: check it and pay, and Dibs confirms by itself.\n"
     ctx.notify_operator(
         f"[dibs] Booking #{booking_id}: ${total / 100:.2f} HELD from {ctx.handle} for {venue['name']} {proposal['starts_at'][:16]} "
-        f"x{proposal['party_size']} ({rate.name}). Book it here: {rate.url}\n"
-        f"Then reply: booked {booking_id} <reference>   or: failed {booking_id} <reason>"
+        f"x{proposal['party_size']} ({rate.name}). Book it here: {rate.url}\n{window}"
+        f"Or reply: booked {booking_id} <reference>   or: failed {booking_id} <reason>"
     )
     return {"booking_id": booking_id, "route": "paid", "held": f"${total / 100:.2f}", "card": method[1],
             "status": "amount held; the booking is being completed and is NOT confirmed yet"}

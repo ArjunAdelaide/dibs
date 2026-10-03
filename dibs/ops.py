@@ -4,6 +4,7 @@ From your phone, reply to the Dibs alert:
     booked 3 Ref STK-2291, lane 7
     failed 3 fully booked at 4pm
     jobs
+    open 3          (opens the prepared checkout window again)
 
 Or in a terminal:
     python -m dibs.ops list
@@ -21,7 +22,7 @@ from . import config, db, payments
 from .catalog import Catalog
 
 OPEN = ("needs_human", "requested", "paid_needs_human")
-COMMAND = re.compile(r"^\s*(booked|failed)\s+#?(\d+)\s*(.*)$|^\s*(jobs)\s*$", re.IGNORECASE | re.DOTALL)
+COMMAND = re.compile(r"^\s*(booked|failed)\s+#?(\d+)\s*(.*)$|^\s*(jobs)\s*$|^\s*(open)\s+#?(\d+)\s*$", re.IGNORECASE | re.DOTALL)
 Send = Callable[[str, str], None]
 
 
@@ -86,7 +87,29 @@ def operator_command(conn: sqlite3.Connection, catalog: Catalog, send: Send, tex
         return None
     if match.group(4):
         return jobs(conn, catalog)
+    if match.group(5):
+        return reopen(conn, catalog, int(match.group(6)))
     return complete(conn, catalog, send, int(match.group(2)), match.group(1).lower(), match.group(3).strip())
+
+
+def reopen(conn: sqlite3.Connection, catalog: Catalog, booking_id: int) -> str:
+    """Open the prepared checkout window again for a booking that still waits."""
+    from . import supervised
+    from .executors import find_slot
+
+    row = conn.execute("SELECT b.status, b.amount_cents, p.* FROM bookings b JOIN proposals p ON p.id = b.proposal_id WHERE b.id = ?",
+                       (booking_id,)).fetchone()
+    if not row or row["status"] not in OPEN:
+        return f"Booking #{booking_id} is not waiting."
+    venue = catalog.venues.get(row["venue_id"], {})
+    if not supervised.can_supervise(venue):
+        return f"No prepared window for {venue.get('name', row['venue_id'])}. Book it on their site."
+    slot, rate = find_slot(venue, datetime.fromisoformat(row["starts_at"]), row["rate"], row["party_size"], fresh=True)
+    if not slot:
+        return f"The slot for #{booking_id} is no longer on the venue's sheet. Reply: failed {booking_id} slot taken"
+    customer = supervised.customer_details(db.get_prefs(conn, row["handle"]).get("name"), row["handle"])
+    supervised.launch(booking_id, venue, rate.url, row["party_size"], f"${(row['amount_cents'] or 0) / 100:.2f}", customer)
+    return f"Opened #{booking_id} in a window on the Mac."
 
 
 def refund_stale_paid(conn: sqlite3.Connection, catalog: Catalog, send: Send, now_iso: str | None = None) -> int:

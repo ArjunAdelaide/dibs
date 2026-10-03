@@ -38,6 +38,8 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr("dibs.config.TICKETMASTER_API_KEY", "")
     monkeypatch.setattr("dibs.config.PAYMENTS_ENABLED", False)
     monkeypatch.setattr("dibs.config.OPEN_ACCESS", False)
+    monkeypatch.setattr("dibs.config.SUPERVISED_CHECKOUT", False)
+    monkeypatch.setattr("dibs.config.BOOKING_EMAIL", "")
     monkeypatch.setattr("dibs.config.BLOCKLIST", set())
     monkeypatch.setattr("dibs.config.STRIPE_SECRET_KEY", "")
 
@@ -641,3 +643,49 @@ def test_stale_held_booking_is_released(paying):
     assert ops.refund_stale_paid(paying.conn, paying.catalog, send, now_iso=later) == 1
     assert paying.state["released"] == ["pi_test_1"] and "$36.00 hold on your card is released" in sent[0]
     assert ops.refund_stale_paid(paying.conn, paying.catalog, send, now_iso=later) == 0  # only once
+
+
+# --- supervised checkout (phase A): runs a real headless browser on local pages ---
+
+from dibs import supervised  # noqa: E402
+
+SLOT_PAGE = """<html><body><h1>Tee Time Detail</h1>
+<input id="Players0" name="Players" type="radio" value="1"><input id="Players1" name="Players" type="radio" value="2">
+<input id="Players2" name="Players" type="radio" value="3"><input id="Players3" name="Players" type="radio" value="4">
+<script>setTimeout(() => { sessionStorage.players = document.querySelector('input[name=Players]:checked').value;
+  location.href = 'details.html'; }, 1200);</script></body></html>"""
+DETAILS_PAGE = """<html><body><label for="fn">First Name</label><input id="fn">
+<label for="ln">Last Name</label><input id="ln"><input name="Email" type="email"><input name="MobilePhone" type="tel">
+<input name="CardNumber" id="card"><input name="Promo">
+<script>setTimeout(() => { sessionStorage.seen = JSON.stringify(['fn','ln','card'].map(i => document.getElementById(i).value));
+  location.href = 'done.html'; }, 1500);</script></body></html>"""
+DONE_PAGE = """<html><body><p>Thank you, your booking is confirmed.</p><p>Confirmation Number: Q18-55555</p>
+<p id="x"></p><script>document.getElementById('x').innerText = sessionStorage.players + '|' + sessionStorage.seen;</script></body></html>"""
+
+
+def test_supervised_window_fills_details_never_cards_and_reads_reference(tmp_path):
+    for name, html in (("slot.html", SLOT_PAGE), ("details.html", DETAILS_PAGE), ("done.html", DONE_PAGE)):
+        (tmp_path / name).write_text(html)
+    found = []
+    venue = {"name": "Mini Golf", "connector": {"type": "quick18"}}
+    customer = supervised.customer_details("Sam Lee", "+61400000001")
+    ended = supervised.run_window(7, venue, (tmp_path / "slot.html").as_uri(), 2, "$40.00", customer, found.append,
+                                  log=lambda m: None, headless=True)
+    assert ended == "confirmed" and found == ["Q18-55555"]
+
+
+def test_supervised_autofill_rules():
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page()
+        page.set_content(DETAILS_PAGE.replace("setTimeout", "void"))
+        filled = page.evaluate(supervised.AUTOFILL_JS, supervised.customer_details("Sam Lee", "+61400000001"))
+        values = {k: page.input_value(sel) for k, sel in
+                  (("first", "#fn"), ("last", "#ln"), ("email", "input[name=Email]"), ("phone", "input[name=MobilePhone]"),
+                   ("card", "#card"), ("promo", "input[name=Promo]"))}
+        browser.close()
+    assert values == {"first": "Sam", "last": "Lee", "email": "", "phone": "+61400000001", "card": "", "promo": ""}
+    assert filled == 3  # no BOOKING_EMAIL in tests, so email stays empty; card and promo are never touched
+    assert supervised.read_reference("Your Reservation #: AB12-99") == "AB12-99"
+    assert supervised.read_reference("Book now and save") is None
